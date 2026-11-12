@@ -34,7 +34,7 @@ Screens: `panel-list.png`, `panel-detail.png`.
 - Hourly sweep: confirm uploads the phone never confirmed; delete drafts after 24 h and failed sends after 7 days.
 
 ### AI agent (MCP, Bearer token)
-Tools: list submissions (filters: status, tags, text), get one (transcript, tags, media URLs), set status.
+Tools: `list_submissions` (filters: status, tags, text), `get_submission` (transcript, tags, name, photos, signed media download URLs), `set_status`. Goal: the AI video editor finds, reads and downloads messages without the owner exporting anything by hand.
 
 ## Out of v1
 Subscriber accounts or status updates; deletion link; anonymous video; LinkedIn field (removed); vlog clip on the home (mockup ready, needs real videos); notifications.
