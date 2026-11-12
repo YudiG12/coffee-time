@@ -1,0 +1,165 @@
+#!/usr/bin/env node
+// Verification CLI for agents (Claude builds, Codex verifies). See AGENTS.md "Verify a change".
+// Runs the Worker locally on an isolated, throwaway D1 with fake data, checks the API, the MCP and auth,
+// and saves screenshots (and a GIF if ffmpeg exists) to verify-out/. Never touches production.
+//   npm run verify            -> all checks + screenshots
+//   npm run verify -- --keep  -> leave the dev server running to explore
+import { spawn, execSync } from "node:child_process";
+import { rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
+
+const freePort = () => new Promise((r) => { const s = createServer().listen(0, () => { const p = s.address().port; s.close(() => r(p)); }); });
+const PORT = await freePort();
+const BASE = `http://localhost:${PORT}`, STATE = ".verify/state", OUT = "verify-out";
+const keep = process.argv.includes("--keep");
+const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] }).toString();
+const results = [];
+const check = async (name, fn) => {
+  try { await fn(); results.push({ name, ok: true }); console.log(`PASS  ${name}`); }
+  catch (e) { results.push({ name, ok: false, error: String(e.message || e) }); console.log(`FAIL  ${name}: ${e.message || e}`); }
+};
+const assert = (c, msg) => { if (!c) throw new Error(msg); };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+rmSync(".verify", { recursive: true, force: true }); rmSync(OUT, { recursive: true, force: true }); mkdirSync(OUT, { recursive: true });
+console.log("migrate + seed (isolated local D1)…");
+sh(`npx wrangler d1 migrations apply coffee-time --local --persist-to ${STATE}`);
+sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --file scripts/demo-seed.sql`);
+
+let log = "";
+const serve = (port, vars) => {
+  const args = ["wrangler", "dev", "--port", String(port), "--persist-to", STATE, ...vars.flatMap((v) => ["--var", v])];
+  const p = spawn("npx", args, { stdio: ["ignore", "pipe", "pipe"], detached: true });
+  p.stdout.on("data", (d) => (log += d)); p.stderr.on("data", (d) => (log += d));
+  const kill = () => { try { process.kill(-p.pid, "SIGTERM"); } catch {} };
+  process.on("exit", kill);
+  return kill;
+};
+const up = async (base) => { for (let i = 0; i < 60; i++) { try { if ((await fetch(base + "/api/health")).ok) return; } catch {} await wait(1000); } throw new Error("server did not start"); };
+
+const stop = serve(PORT, ["DEV_OPEN:1"]);
+await up(BASE);
+
+const api = async (path, init) => { const r = await fetch(BASE + path, { ...init, headers: { "content-type": "application/json", ...(init?.headers || {}) } }); return { status: r.status, body: await r.json().catch(() => null) }; };
+const mcp = (name, args) => api("/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
+const mcpData = async (name, args) => { const r = await mcp(name, args); assert(r.body?.result && !r.body.result.isError, JSON.stringify(r.body).slice(0, 200)); return JSON.parse(r.body.result.content[0].text); };
+
+// ---- API / MCP ----
+await check("api: health", async () => { const r = await api("/api/health"); assert(r.status === 200 && r.body.ok, `status ${r.status}`); });
+await check("api: panel lists the demo messages", async () => {
+  const r = await api("/api/panel/submissions"); assert(r.status === 200 && r.body.length === 3, `got ${r.status} ${r.body?.length}`);
+});
+await check("api: panel filters by tag and text", async () => {
+  const t = await api("/api/panel/submissions?tag=Kafka"); assert(t.body.length === 1, `tag → ${t.body.length}`);
+  const q = await api("/api/panel/submissions?q=Lisboa"); assert(q.body.length === 1, `q → ${q.body.length}`);
+});
+await check("mcp: tools/list has the three tools", async () => {
+  const r = await api("/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  const names = (r.body?.result?.tools || []).map((t) => t.name).sort().join(",");
+  assert(names === "get_submission,list_submissions,set_status", names);
+});
+await check("mcp: list_submissions filters favorites", async () => { const d = await mcpData("list_submissions", { status: "favorite" }); assert(d.length === 1 && d[0].id === "demo-2", JSON.stringify(d).slice(0, 120)); });
+await check("mcp: get_submission returns transcript and tags", async () => { const d = await mcpData("get_submission", { id: "demo-1" }); assert(d.transcript && JSON.parse(d.tags).includes("Kafka"), "missing fields"); });
+await check("mcp: set_status updates and rejects bad values", async () => {
+  await mcpData("set_status", { id: "demo-3", status: "used" });
+  assert((await mcpData("get_submission", { id: "demo-3" })).status === "used", "not updated");
+  const bad = await mcp("set_status", { id: "demo-3", status: "deleted" }); assert(bad.body?.result?.isError, "accepted invalid status");
+});
+
+// ---- Screens ----
+const { chromium } = await import("playwright");
+const browser = await chromium.launch();
+// Offline-safe: external requests (Google Fonts) get an empty reply, so sandboxes without internet behave the same
+const offline = (ctx) => ctx.route((url) => !url.href.startsWith(BASE), (r) => r.fulfill({ status: 200, body: "" }));
+const errors = [];
+const shot = async (name, path, viewport) => {
+  const ctx = await browser.newContext({ viewport }); await offline(ctx);
+  const page = await ctx.newPage();
+  page.on("pageerror", (e) => errors.push(e.message)); page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  await page.goto(BASE + path, { waitUntil: "networkidle" });
+  await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const text = await page.locator("body").innerText(); await ctx.close(); return text;
+};
+await check("ui: start page (mobile) shows the record and upload buttons", async () => {
+  const t = await shot("start-mobile", "/", { width: 390, height: 844 });
+  assert(t.includes("Gravar áudio") && t.includes("Envie um arquivo"), "buttons missing");
+});
+await check("ui: start page (desktop)", async () => { const t = await shot("start-desktop", "/", { width: 1440, height: 900 }); assert(t.includes("Envie uma mensagem"), "title missing"); });
+await check("ui: panel lists messages with tags", async () => {
+  const t = await shot("panel", "/painel", { width: 1440, height: 900 });
+  assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
+});
+await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
+await check("ui: record main flow", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } } });
+  await offline(ctx); const p = await ctx.newPage();
+  await p.goto(BASE + "/", { waitUntil: "networkidle" }); await p.waitForTimeout(1200);
+  await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); await p.waitForTimeout(1500);
+  const vid = await p.video().path(); await ctx.close();
+  try { execSync(`ffmpeg -y -loglevel error -i ${vid} -vf "fps=8,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" ${OUT}/flow.gif`); }
+  catch { console.log("      (ffmpeg not found: kept webm only)"); }
+});
+await browser.close();
+
+// ---- Auth: a second server configured like production (agent token set). Guards the "no human review" pipeline:
+// a PR that loosens auth fails here instead of merging.
+{
+  const P2 = await freePort(), B2 = `http://localhost:${P2}`, TOKEN = randomBytes(24).toString("hex"); // throwaway, never deployed
+  const kill2 = serve(P2, [`AGENT_TOKEN:${TOKEN}`, "DEV_OPEN:1"]);
+  await up(B2);
+  const get = (path, headers = {}) => fetch(B2 + path, { headers }).then((r) => r.status).catch(() => 0);
+  const post = (path, headers = {}) => fetch(B2 + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }).then((r) => r.status).catch(() => 0);
+  await check("auth: the public page stays public", async () => { const st = await get("/"); assert(st === 200, `${st}`); });
+  await check("auth: no credentials → 401 even on localhost with DEV_OPEN once a token is configured", async () => {
+    for (const p of ["/painel", "/api/panel/submissions"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
+    const st = await post("/mcp"); assert(st === 401, `/mcp → ${st}`);
+  });
+  await check("auth: wrong / empty Bearer → 401", async () => {
+    for (const h of ["Bearer wrong", "Bearer ", `Bearer ${TOKEN}x`]) { const st = await post("/mcp", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
+  });
+  await check("auth: forged Access JWT header → 401", async () => {
+    const jwt = [{ alg: "RS256" }, { sub: "x" }].map((o) => Buffer.from(JSON.stringify(o)).toString("base64url")).join(".") + ".c2ln";
+    const st = await get("/api/panel/submissions", { "cf-access-jwt-assertion": jwt }); assert(st === 401, `${st}`);
+  });
+  await check("auth: correct Bearer → 200", async () => {
+    assert((await post("/mcp", { authorization: `Bearer ${TOKEN}` })) === 200, "mcp");
+    assert((await get("/api/panel/submissions", { authorization: `Bearer ${TOKEN}` })) === 200, "panel api");
+  });
+  kill2();
+}
+// Access JWT signature, tested directly on src/auth.ts with keys made here (the real JWKS fetch is stubbed).
+{
+  const js = execSync("npx esbuild src/auth.ts --format=esm --log-level=error").toString();
+  const auth = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+  const { subtle } = globalThis.crypto, TEAM = "verify.cloudflareaccess.com", AUD = "verify-aud";
+  const gen = () => subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  const good = await gen(), evil = await gen();
+  const jwk = { ...(await subtle.exportKey("jwk", good.publicKey)), kid: "k1" };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u) => { assert(String(u) === `https://${TEAM}/cdn-cgi/access/certs`, `fetched ${u}`); return new Response(JSON.stringify({ keys: [jwk] })); };
+  const b64 = (x) => Buffer.from(typeof x === "string" ? x : new Uint8Array(x)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const sign = async (key, claims = {}, header = {}) => {
+    const h = b64(JSON.stringify({ alg: "RS256", kid: "k1", ...header })), p = b64(JSON.stringify({ aud: [AUD], iss: `https://${TEAM}`, exp: now + 300, ...claims }));
+    return `${h}.${p}.${b64(await subtle.sign("RSASSA-PKCS1-v1_5", key.privateKey, new TextEncoder().encode(`${h}.${p}`)))}`;
+  };
+  const ok = async (jwt) => { auth._resetCerts(); return auth.verifyAccess(jwt, TEAM, AUD).catch(() => false); };
+  try {
+    await check("auth: Access JWT signed by the team key is accepted", async () => assert(await ok(await sign(good)) === true, "rejected a valid JWT"));
+    await check("auth: Access JWT with valid claims but a forged signature → rejected", async () => assert(await ok(await sign(evil)) === false, "accepted forged signature"));
+    await check("auth: Access JWT tampered after signing → rejected", async () => {
+      const [h, , sig] = (await sign(good)).split("."); const p = b64(JSON.stringify({ aud: [AUD], iss: `https://${TEAM}`, exp: now + 300, email: "attacker@x" }));
+      assert(await ok(`${h}.${p}.${sig}`) === false, "accepted tampered payload");
+    });
+    await check("auth: Access JWT with wrong aud / iss / expired / alg none → rejected", async () => {
+      for (const [c, h] of [[{ aud: ["other"] }], [{ iss: "https://evil.com" }], [{ exp: now - 10 }], [{}, { alg: "none" }]]) assert(await ok(await sign(good, c, h)) === false, `accepted ${JSON.stringify({ ...c, ...h })}`);
+    });
+  } finally { globalThis.fetch = realFetch; }
+}
+
+const failed = results.filter((r) => !r.ok);
+writeFileSync(`${OUT}/report.json`, JSON.stringify({ verdict: failed.length ? "FAIL" : "PASS", results }, null, 2));
+if (failed.length) writeFileSync(`${OUT}/server.log`, log);
+console.log(`\n${failed.length ? "FAIL" : "PASS"}  ${results.length - failed.length}/${results.length} checks · screenshots in ${OUT}/`);
+if (keep) { console.log(`server running at ${BASE} (Ctrl+C to stop)`); } else { stop(); process.exit(failed.length ? 1 : 0); }

@@ -1,0 +1,25 @@
+{
+  "name": "coffee-time",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply coffee-time --local",
+    "db:migrate": "wrangler d1 migrations apply coffee-time --remote",
+    "verify": "node scripts/verify.mjs",
+    "render-docs": "docs/architecture/render.sh"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261110.1",
+    "esbuild": "^0.24.0",
+    "playwright": "^1.49.1",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}
