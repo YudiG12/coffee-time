@@ -42,7 +42,7 @@ def tile(n, c, s, i): return f'<div class="tile" style="width:{s}px;height:{s}px
 # ---------- banner 1280 x 300 ----------
 cl = [("mic", "#C77D2E", "Audio"), ("video", "#3767A8", "Video"), ("image", "#2F8A5B", "Photos")]
 rows = "".join(f'<div style="display:flex;align-items:center;gap:12px">{tile(n, c, 40, 20)}<span style="font-weight:600;font-size:16px">{l}</span></div>' for n, c, l in cl)
-tags = "".join(f'<span style="font-size:13px;font-weight:600;padding:4px 9px;border-radius:4px;background:var(--tag-bg);color:var(--tag);border:1px solid var(--tag-line)">{t}</span>' for t in ["Workers", "R2", "D1", "Queues", "Workers AI", "Turnstile"])
+tags = "".join(f'<span style="font-size:13px;font-weight:600;padding:4px 9px;border-radius:4px;background:var(--tag-bg);color:var(--tag);border:1px solid var(--tag-line)">{t}</span>' for t in ["Workers", "R2", "D1", "Queues", "Workers AI", "MCP"])
 SUBS = "120K"  # YouTube subscribers, update when it grows
 banner = HEAD + f'''<div style="width:1280px;height:364px;position:relative;border:1px solid var(--line);border-radius:4px;background:var(--bg);overflow:hidden">
 <div style="position:absolute;left:64px;top:54px;width:660px">
@@ -50,13 +50,13 @@ banner = HEAD + f'''<div style="width:1280px;height:364px;position:relative;bord
  <div style="font-size:21px;color:var(--muted);margin-top:14px;line-height:1.35">Subscribers send a voice or video message;<br>I play it in the vlog and answer.</div>
  <div style="display:flex;gap:8px;margin-top:22px;align-items:center">{ic("cloudflare", "#F38020", 26)}{tags}</div>
 </div>
-<div style="position:absolute;left:770px;top:48px;display:flex;flex-direction:column;gap:12px">{rows}</div>
-<svg style="position:absolute;left:928px;top:48px" width="110" height="204" fill="none" stroke="var(--line2)" stroke-width="1.5">
+<div style="position:absolute;left:700px;top:48px;display:flex;flex-direction:column;gap:12px">{rows}</div>
+<svg style="position:absolute;left:836px;top:48px" width="110" height="204" fill="none" stroke="var(--line2)" stroke-width="1.5">
  <path d="M8 20 C64 20 54 102 104 102"/><path d="M8 72 C64 72 54 102 104 102"/><path d="M8 124 C64 124 54 102 104 102"/></svg>
-<div style="position:absolute;left:1036px;top:84px;width:180px;height:134px;border:1px solid var(--sand-line);background:var(--sand-bg);border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
- {tile("coffee", "#C77D2E", 50, 26)}<div style="font-weight:700;color:var(--sand-ink);font-size:16px">The coffee segment</div>
+<div style="position:absolute;left:944px;top:84px;width:150px;height:134px;border:1px solid var(--sand-line);background:var(--sand-bg);border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
+ {tile("coffee", "#C77D2E", 50, 26)}<div style="font-weight:700;color:var(--sand-ink);font-size:15px">Coffee segment</div>
  <div style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sand)">{ic("cloudflare", "#F38020", 15)}on Cloudflare</div></div>
-<div style="position:absolute;left:0;right:0;bottom:0;height:64px;border-top:1px solid var(--line);background:var(--sand-bg);display:flex;align-items:center;gap:12px;padding:0 64px">
+<svg style="position:absolute;left:1094px;top:142px" width="46" height="16"><path d="M2 8 H38" stroke="var(--line2)" stroke-width="1.5" fill="none"/><path d="M36 3 L44 8 L36 13z" fill="var(--line2)"/></svg><div style="position:absolute;left:1140px;top:84px;width:110px;height:134px;border:1px solid color-mix(in srgb,#5A4BD1 35%,var(--bg));background:color-mix(in srgb,#5A4BD1 8%,var(--bg));border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">{tile("claude", "#D97757", 50, 26)}<div style="font-weight:700;font-size:15px;text-align:center;line-height:1.2">AI video<br>editor</div><span style="font-size:12px;font-weight:700;padding:2px 8px;border-radius:4px;background:#5A4BD1;color:#fff">MCP</span></div><div style="position:absolute;left:0;right:0;bottom:0;height:64px;border-top:1px solid var(--line);background:var(--sand-bg);display:flex;align-items:center;gap:12px;padding:0 64px">
  <img src="avatar.jpg" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:1px solid var(--sand-line)">
  <span style="font-size:15px;color:var(--muted)">A project by <b style="color:var(--ink);font-weight:700">Yudi Ganeko</b> · software engineer, code and dev careers</span>
  <span style="margin-left:auto;display:flex;align-items:center;gap:8px;font-size:15px;color:var(--muted)"><svg width="26" height="19" viewBox="0 0 18 13"><rect width="18" height="13" rx="3" fill="#E5322D"/><path d="M7 3.5v6l5-3z" fill="#fff"/></svg><b style="color:var(--ink);font-weight:700">{SUBS}</b> subscribers on YouTube</span>
@@ -81,7 +81,7 @@ hld = HEAD + f'''<div style="width:1200px;height:500px;position:relative;backgro
 <svg style="position:absolute;left:0;top:0" width="1200" height="500">{M}
 <g fill="none" style="stroke:var(--arrow)" stroke-width="1.8" marker-end="url(#a)">
  <path d="M222 176 H320 V258 H462"/><path d="M172 376 H320 V288 H462"/><path d="M576 258 H690 V170 H742"/><path d="M576 288 H690 V380 H742"/><path d="M576 273 H982"/></g></svg>
-<div style="position:absolute;left:52px;top:120px">{mac}</div><div class="nm" style="left:37px;top:240px">You and your AI agent</div>
+<div style="position:absolute;left:52px;top:120px">{mac}</div><div class="nm" style="left:37px;top:240px">You + AI editor (MCP)</div>
 <div style="position:absolute;left:102px;top:314px">{phone}</div><div class="nm" style="left:37px;top:446px">Subscribers</div>
 {sq(520, 273, "workers", "#F38020", "Worker")}{sq(800, 165, "folder", "#2F8A5B", "R2 · media")}{sq(800, 380, "database", "#D1495B", "D1 · messages")}{sq(1040, 273, "sparkles", "#7B6CF0", "Workers AI")}
 </div></body></html>'''
