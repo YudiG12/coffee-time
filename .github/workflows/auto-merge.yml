@@ -1,0 +1,23 @@
+name: Auto-merge
+# Merges every PR when Codex (the independent verifier) passes it and CI is green,
+# then publishes a Release + CHANGELOG.md line. Circuit breaker on repeated findings or 5 rounds.
+on:
+  pull_request_review: { types: [submitted] }
+  issue_comment: { types: [created] }
+  workflow_run: { workflows: [CI], types: [completed] }
+permissions: { contents: write, pull-requests: write, issues: write, actions: write }
+concurrency: { group: "auto-merge-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}" }
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    # issue_comment also fires on plain issues: only PR comments matter
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }  # always run the trusted script from main, never from the PR
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+        run: node .github/scripts/auto-merge.mjs

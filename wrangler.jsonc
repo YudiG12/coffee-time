@@ -1,0 +1,14 @@
+{
+  "name": "coffee-time",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "assets": { "directory": "public", "binding": "ASSETS", "run_worker_first": ["/api/*", "/mcp", "/painel*"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "coffee-time", "database_id": "REPLACE_WITH_YOUR_D1_ID", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "coffee-time-media" }
+  ],
+  // Secrets (wrangler secret put): AGENT_TOKEN. Vars set in the dashboard: ACCESS_TEAM_DOMAIN, ACCESS_AUD.
+  "observability": { "enabled": true }
+}
