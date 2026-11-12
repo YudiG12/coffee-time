@@ -86,6 +86,23 @@ await check("ui: start page (mobile) shows the record and upload buttons", async
   assert(t.includes("Gravar áudio") && t.includes("Envie um arquivo"), "buttons missing");
 });
 await check("ui: start page (desktop)", async () => { const t = await shot("start-desktop", "/", { width: 1440, height: 900 }); assert(t.includes("Envie uma mensagem"), "title missing"); });
+// No overlap between hero, vlog and the send card at any width (two columns start at 1024 px).
+await check("ui: start page has no overlap at intermediate widths", async () => {
+  const ctx = await browser.newContext(); await offline(ctx); const p = await ctx.newPage();
+  for (const w of [320, 768, 960, 1023, 1024, 1100, 1280, 1360, 1440, 1920]) {
+    await p.setViewportSize({ width: w, height: 900 }); await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    const r = await p.evaluate(() => {
+      const b = (s) => document.querySelector(s).getBoundingClientRect();
+      const over = (a, c) => a.left < c.right && c.left < a.right && a.top < c.bottom && c.top < a.bottom;
+      const card = b(".card"), h1 = document.querySelector(".hero h1");
+      return { hero: over(b(".hero h1"), card) || over(b(".hero p"), card) || over(b(".hero img"), card) || over(b(".vlog"), card),
+        clip: h1.scrollWidth > h1.clientWidth + 1, scroll: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert(!r.hero, `${w}px: send card overlaps the hero or vlog`); assert(!r.clip, `${w}px: title overflows`); assert(!r.scroll, `${w}px: horizontal scroll`);
+    if (w === 1024) await p.screenshot({ path: `${OUT}/start-1024.png`, fullPage: true });
+  }
+  await ctx.close();
+});
 // Start page as in docs/design/*-1a-start.png: hero, tabs + hint, two buttons with icons, "Como fica no vlog".
 await check("ui: start page layout, tabs and icons (mobile + desktop)", async () => {
   for (const [vp, desktop] of [[{ width: 390, height: 844 }, false], [{ width: 1440, height: 900 }, true]]) {

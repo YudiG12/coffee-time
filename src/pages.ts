@@ -45,16 +45,18 @@ export const startPage = () => layout("Coffee Time", `<style>
 .thumb{position:relative;width:150px;aspect-ratio:16/10;flex-shrink:0;border:1px solid var(--line2);border-radius:4px;background:linear-gradient(135deg,#5A3F28 0%,#3A2A1D 50%,#241B14 100%);display:flex;align-items:center;justify-content:center}
 .play{width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center}
 .vlog p{margin:0;color:var(--muted);font-size:14px;line-height:21px}
-@media (min-width:960px){
- .start{max-width:1292px;grid-template-columns:minmax(0,1fr) 460px;grid-template-areas:"hero card" "vlog card";column-gap:80px;row-gap:40px;align-content:center;padding:48px 40px}
- .hero{gap:24px}.hero img{width:170px;height:170px;border-radius:18px;box-shadow:0 0 90px 24px rgba(224,163,90,.2)}
- .hero h1{font-size:44px;line-height:48px}.hero h1 span{white-space:nowrap}.hero h1 svg{width:38px;height:38px;vertical-align:-4px}
+.hero > div{min-width:0}
+@media (min-width:1024px){
+ .start{max-width:1292px;grid-template-columns:minmax(0,1fr) minmax(360px,460px);grid-template-areas:"hero card" "vlog card";column-gap:clamp(40px,5.5vw,80px);row-gap:40px;align-content:center;padding:48px 40px}
+ .hero{gap:clamp(16px,1.7vw,24px)}.hero img{width:clamp(120px,11.8vw,170px);height:clamp(120px,11.8vw,170px);border-radius:18px;box-shadow:0 0 90px 24px rgba(224,163,90,.2)}
+ .hero h1{font-size:clamp(32px,3.06vw,44px);line-height:1.1}.hero h1 svg{width:.86em;height:.86em;vertical-align:-.1em}
  .hero p{font-size:18px;line-height:28px;margin-top:14px;max-width:460px}
  .card{align-self:center;padding:24px;border:1px solid var(--line2);border-radius:4px;background:#1C1611}
  .tab{font-size:15px;padding:8px}.hint{margin:6px 0 14px}
  .btn.primary{padding:15px;font-size:17px}.btn.secondary{padding:12px;font-size:15px}
- .vlog{margin-top:0}.thumb{width:240px}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}
+ .vlog{margin-top:0}.thumb{width:clamp(180px,16.7vw,240px)}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}
 }
+@media (min-width:1360px){.hero h1 span{white-space:nowrap}}
 </style>
 <main class="start">
 <section class="hero">
