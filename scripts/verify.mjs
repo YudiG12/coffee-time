@@ -87,19 +87,25 @@ await check("ui: start page (mobile) shows the record and upload buttons", async
 });
 await check("ui: start page (desktop)", async () => { const t = await shot("start-desktop", "/", { width: 1440, height: 900 }); assert(t.includes("Envie uma mensagem"), "title missing"); });
 // No overlap between hero, vlog and the send card at any width (two columns start at 1024 px).
+// Also swept with a wide fallback font (DejaVu Sans), since sandboxes and CI render without Onest.
 await check("ui: start page has no overlap at intermediate widths", async () => {
   const ctx = await browser.newContext(); await offline(ctx); const p = await ctx.newPage();
-  for (const w of [320, 768, 960, 1023, 1024, 1100, 1280, 1360, 1440, 1920]) {
+  for (const font of [null, "DejaVu Sans"]) for (const w of [320, 768, 960, 1023, 1024, 1100, 1280, 1360, 1440, 1920]) {
+    const tag = `${w}px${font ? ` (${font})` : ""}`;
     await p.setViewportSize({ width: w, height: 900 }); await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    if (font) await p.addStyleTag({ content: `body,body *{font-family:"${font}",sans-serif !important}` });
     const r = await p.evaluate(() => {
       const b = (s) => document.querySelector(s).getBoundingClientRect();
       const over = (a, c) => a.left < c.right && c.left < a.right && a.top < c.bottom && c.top < a.bottom;
-      const card = b(".card"), h1 = document.querySelector(".hero h1");
-      return { hero: over(b(".hero h1"), card) || over(b(".hero p"), card) || over(b(".hero img"), card) || over(b(".vlog"), card),
-        clip: h1.scrollWidth > h1.clientWidth + 1, scroll: document.documentElement.scrollWidth > innerWidth };
+      const card = b(".card"), h1 = document.querySelector(".hero h1"), hb = h1.getBoundingClientRect();
+      const rg = document.createRange(); rg.selectNodeContents(h1); const lines = [...rg.getClientRects()];
+      return { hero: [b(".hero h1"), b(".hero p"), b(".hero img"), b(".vlog"), ...lines].some((x) => over(x, card)),
+        clip: h1.scrollWidth > h1.clientWidth + 1 || lines.some((x) => x.right > hb.right + 1),
+        scroll: document.documentElement.scrollWidth > innerWidth };
     });
-    assert(!r.hero, `${w}px: send card overlaps the hero or vlog`); assert(!r.clip, `${w}px: title overflows`); assert(!r.scroll, `${w}px: horizontal scroll`);
-    if (w === 1024) await p.screenshot({ path: `${OUT}/start-1024.png`, fullPage: true });
+    assert(!r.hero, `${tag}: send card overlaps the hero or vlog`); assert(!r.clip, `${tag}: title overflows`); assert(!r.scroll, `${tag}: horizontal scroll`);
+    if (w === 1024 && !font) await p.screenshot({ path: `${OUT}/start-1024.png`, fullPage: true });
+    if (w === 1440 && font) await p.screenshot({ path: `${OUT}/start-1440-fallback-font.png`, fullPage: true });
   }
   await ctx.close();
 });
