@@ -56,12 +56,11 @@ export const startPage = () => layout("Coffee Time", `<style>
  .btn.primary{padding:15px;font-size:17px}.btn.secondary{padding:12px;font-size:15px}
  .vlog{margin-top:0}.thumb{width:clamp(180px,16.7vw,240px)}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}
 }
-@media (min-width:1360px){.hero h1 span{white-space:nowrap}}
 </style>
 <main class="start">
 <section class="hero">
  <img src="/yudi.jpg" alt="Yudi Ganeko" width="170" height="170">
- <div><h1><span>Envie uma mensagem</span><br><span>para eu escutar</span><br><span>nos vlogs! ${COFFEE}</span></h1>
+ <div><h1>Envie uma mensagem<br>para eu escutar<br>nos vlogs! ${COFFEE}</h1>
  <p>Uma história, uma pergunta, qualquer coisa. Abra seu <span style="white-space:nowrap">coração ${HEART}</span></p></div>
 </section>
 <section class="card" aria-label="Enviar mensagem">
