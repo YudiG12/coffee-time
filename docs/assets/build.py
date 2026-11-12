@@ -50,9 +50,9 @@ banner = HEAD + f'''<div style="width:1280px;height:364px;position:relative;bord
  <div style="font-size:21px;color:var(--muted);margin-top:14px;line-height:1.35">Subscribers send a voice or video message;<br>I play it in the vlog and answer.</div>
  <div style="display:flex;gap:8px;margin-top:22px;align-items:center">{ic("cloudflare", "#F38020", 26)}{tags}</div>
 </div>
-<div style="position:absolute;left:700px;top:48px;display:flex;flex-direction:column;gap:12px">{rows}</div>
-<svg style="position:absolute;left:836px;top:48px" width="110" height="204" fill="none" stroke="var(--line2)" stroke-width="1.5">
- <path d="M8 20 C64 20 54 102 104 102"/><path d="M8 72 C64 72 54 102 104 102"/><path d="M8 124 C64 124 54 102 104 102"/></svg>
+<div style="position:absolute;left:700px;top:79px;display:flex;flex-direction:column;gap:12px">{rows}</div>
+<svg style="position:absolute;left:836px;top:79px" width="110" height="150" fill="none" stroke="var(--line2)" stroke-width="1.5">
+ <path d="M8 20 C64 20 54 72 104 72"/><path d="M8 72 H104"/><path d="M8 124 C64 124 54 72 104 72"/></svg>
 <div style="position:absolute;left:944px;top:84px;width:150px;height:134px;border:1px solid var(--sand-line);background:var(--sand-bg);border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
  {tile("coffee", "#C77D2E", 50, 26)}<div style="font-weight:700;color:var(--sand-ink);font-size:15px">Coffee segment</div>
  <div style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sand)">{ic("cloudflare", "#F38020", 15)}on Cloudflare</div></div>
