@@ -132,13 +132,14 @@ const runs = await api(`/commits/${head}/check-runs`);
 const ci = runs.check_runs.find((c) => c.name === "check")?.conclusion;
 if (ci !== "success") stop(`CI: ${ci ?? "pending"}`);
 if (!latest?.pass) stop("no Codex PASS for head commit");
-// Production first: while the last deploy of main failed, only the PR that fixes it may merge.
+// Production first: while production is broken — the last deploy of main failed, or any deploy-failed issue is open
+// (the watchdog opens one when health fails between deploys) — only a PR that closes one of those issues may merge.
 const deploys = await api(`/actions/workflows/deploy.yml/runs?branch=main&per_page=5`).catch(() => null);
 const lastDeploy = deploys?.workflow_runs?.find((r) => r.status === "completed");
-if (lastDeploy?.conclusion === "failure") {
-  const broken = (await all(`/issues?state=open&labels=deploy-failed`)).map((i) => i.number);
+const broken = (await all(`/issues?state=open&labels=deploy-failed`)).filter((i) => !i.pull_request).map((i) => i.number);
+if (lastDeploy?.conclusion === "failure" || broken.length) {
   const fixes = [...(pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map((m) => Number(m[1]));
-  if (!fixes.some((n) => broken.includes(n))) stop(`main deploy is failing (${lastDeploy.html_url}): only the deploy-failed fix may merge`);
+  if (!fixes.some((n) => broken.includes(n))) stop(`production is broken (${broken.length ? `issue #${broken.join(", #")}` : lastDeploy.html_url}): only the deploy-failed fix may merge`);
 }
 
 try {
