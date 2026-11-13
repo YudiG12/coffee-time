@@ -61,7 +61,9 @@ const authRanges = async () => {
   return out;
 };
 const touchesAuth = async (f) => {
-  if (!f.patch) return f.status === "removed" || f.status === "renamed";
+  // Moving or deleting the verifier hides every auth check from CI, whatever the patch says
+  if (f.status === "removed" || f.status === "renamed" || f.filename !== VERIFY) return true;
+  if (!f.patch) return true; // too large to diff: assume it touches auth
   const ranges = await authRanges();
   let old = 0;
   for (const l of f.patch.split("\n")) {
