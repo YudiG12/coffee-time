@@ -75,6 +75,7 @@ const mcpData = async (name, args) => { const r = await mcp(name, args); assert(
 
 // ---- API / MCP ----
 await check("api: health", async () => { const r = await api("/api/health"); assert(r.status === 200 && r.body.ok, `status ${r.status}`); });
+await check("api: deep health reports db, media, jobs and signing", async () => { const r = await api("/api/health?deep=1"); assert(["db", "media", "jobs", "signing"].every((k) => k in r.body), JSON.stringify(r.body)); assert(r.body.db && r.body.media && r.body.jobs, JSON.stringify(r.body)); });
 await check("api: panel lists the demo messages", async () => {
   const r = await api("/api/panel/submissions"); assert(r.status === 200 && r.body.length === 3, `got ${r.status} ${r.body?.length}`);
 });

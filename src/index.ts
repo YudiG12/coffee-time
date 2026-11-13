@@ -36,7 +36,20 @@ app.get("/", (c) => {
   const max = Number(c.req.query("max"));
   return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90, c.env.TURNSTILE_SITE_KEY));
 });
-app.get("/api/health", (c) => c.json({ ok: true }));
+// ?deep=1: checks the bindings production needs (D1 query, R2 read, queue binding, upload signing secrets).
+// deploy.yml calls it right after deploying; a failure opens a `deploy-failed` issue.
+app.get("/api/health", async (c) => {
+  if (!c.req.query("deep")) return c.json({ ok: true });
+  const run = async (fn: () => Promise<unknown>) => { try { await fn(); return true; } catch { return false; } };
+  const checks = {
+    db: await run(() => c.env.DB.prepare("SELECT 1").first()),
+    media: await run(() => c.env.MEDIA.head("health-probe")),
+    jobs: typeof c.env.JOBS?.send === "function",
+    signing: Boolean(c.env.R2_ACCESS_KEY_ID && c.env.R2_SECRET_ACCESS_KEY && c.env.R2_ACCOUNT_ID),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return c.json({ ok, ...checks }, ok ? 200 : 503);
+});
 registerDrafts(app);
 registerSend(app);
 app.get("/privacidade", (c) => c.html(privacyPage()));
