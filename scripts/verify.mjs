@@ -29,9 +29,23 @@ console.log("migrate + seed (isolated local D1)…");
 sh(`npx wrangler d1 migrations apply coffee-time --local --persist-to ${STATE}`);
 sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --file scripts/demo-seed.sql`);
 
+// The Worker runs from a copy of wrangler.jsonc where Workers AI (remote only, needs an account) is replaced by a
+// service binding to scripts/fixtures/ai-stub.js, and queue retries are immediate (JOBS_RETRY_BASE_S=0).
+const prod = JSON.parse(readFileSync("wrangler.jsonc", "utf8").replace(/^\s*\/\/.*$/gm, ""));
+assert(prod.ai?.binding === "AI" && prod.queues?.producers?.[0]?.binding === "JOBS", "wrangler.jsonc: AI or JOBS binding missing");
+const { ai, ...rest } = prod;
+const VCONF = ".verify/wrangler.jsonc", STUBCONF = ".verify/ai-stub.jsonc";
+writeFileSync(VCONF, JSON.stringify({
+  ...rest, main: "../src/index.ts", assets: { ...prod.assets, directory: "../public" },
+  d1_databases: prod.d1_databases.map((d) => ({ ...d, migrations_dir: "../migrations" })),
+  services: [{ binding: "AI", service: "coffee-time-ai-stub", entrypoint: "AiStub" }],
+  queues: { ...prod.queues, consumers: prod.queues.consumers.map((q) => ({ ...q, max_batch_timeout: 1 })) },
+}, null, 2));
+writeFileSync(STUBCONF, JSON.stringify({ name: "coffee-time-ai-stub", main: "../scripts/fixtures/ai-stub.js", compatibility_date: prod.compatibility_date }));
+
 let log = "";
 const serve = (port, vars) => {
-  const args = ["wrangler", "dev", "--port", String(port), "--persist-to", STATE, ...vars.flatMap((v) => ["--var", v])];
+  const args = ["wrangler", "dev", "-c", VCONF, "-c", STUBCONF, "--port", String(port), "--persist-to", STATE, ...["JOBS_RETRY_BASE_S:0", ...vars].flatMap((v) => ["--var", v])];
   const p = spawn("npx", args, { stdio: ["ignore", "pipe", "pipe"], detached: true });
   p.stdout.on("data", (d) => (log += d)); p.stderr.on("data", (d) => (log += d));
   const kill = () => { try { process.kill(-p.pid, "SIGTERM"); } catch {} };
@@ -219,6 +233,63 @@ await check("api: draft files — media again (same kind) and a video's audio tr
   // An audio message never gets a track, and a sent one without it keeps audio_key empty.
   assert((await mcpData("get_submission", { id: sentId })).audio_key === null, "audio message with audio_key");
 });
+// ---- Transcript and tags (ADR 0004): Send enqueues a job; the consumer (Whisper + tags, AI stubbed) fills them in.
+const until = async (fn, ms = 30000) => { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > ms) return null; await wait(500); } };
+const panelRow = async (id) => (await api("/api/panel/submissions")).body.find((x) => x.id === id);
+const markedWav = (mark) => { const b = wav(1); b.write(mark, 100, "latin1"); return b; }; // still a valid WAV
+const sendAudio = async (buf, name) => {
+  const d = await newDraft("audio", buf, "audio/wav");
+  assert((await putFile(d.upload.url, buf, "audio/wav")) === 200, "upload failed");
+  const r = await post(`/api/drafts/${d.id}/send`, { consent: true, name, photos: [] }); assert(r.status === 200, `send → ${r.status}`);
+  return d.id;
+};
+const STUB_TRANSCRIPT = "Oi Yudi, sou de Lisboa e queria saber como você organiza a semana entre trabalho e vlog.";
+await check("api: Send enqueues a job; the consumer saves the transcript (pt) and free tags, shown in the panel API and MCP", async () => {
+  const id = await sendAudio(wav(2), "Teste Transcrição");
+  const row = await until(async () => { const r = await panelRow(id); return r?.transcript != null && r; });
+  assert(row, `no transcript after 30 s: ${JSON.stringify(await panelRow(id))}`);
+  assert(row.transcript === STUB_TRANSCRIPT, `transcript ${JSON.stringify(row.transcript)}`);
+  const tags = JSON.parse(row.tags);
+  assert(JSON.stringify(tags) === JSON.stringify(["Dúvida", "Rotina", "Lisboa", "Um tema comprido demais para"]), `tags ${row.tags}`);
+  assert(row.status === "new" && row.transcript_error === null, JSON.stringify(row));
+  assert((await api("/api/panel/submissions?tag=Rotina")).body.some((x) => x.id === id), "tag filter misses the new tags");
+  assert((await api(`/api/panel/submissions?q=${encodeURIComponent("organiza a semana")}`)).body.some((x) => x.id === id), "text search misses the transcript");
+  assert((await mcpData("get_submission", { id })).transcript === STUB_TRANSCRIPT, "MCP has no transcript");
+});
+await check("api: a failing job is retried, ends in the dead-letter queue, and the message stays (no transcript, marked)", async () => {
+  const id = await sendAudio(markedWav("FAILJOB"), "Teste Falha");
+  const row = await until(async () => { const r = await panelRow(id); return r?.transcript_error && r; }, 45000);
+  assert(row, `not dead-lettered after 45 s: ${JSON.stringify(await panelRow(id))}`);
+  assert(row.status === "new" && row.transcript === null && row.name === "Teste Falha" && JSON.parse(row.tags).length === 0, JSON.stringify(row));
+  const attempts = (log.match(new RegExp(`transcribe ${id} attempt \\d+ failed`, "g")) || []).length;
+  assert(attempts === 1 + prod.queues.consumers[0].max_retries, `attempts ${attempts}, want ${1 + prod.queues.consumers[0].max_retries}`);
+  assert((await mcpData("get_submission", { id })).media_key === `media/${id}/media`, "media lost");
+});
+// Tag cleanup and the Worker's queue wiring, tested directly on src/jobs/transcribe.ts.
+{
+  const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/jobs/transcribe.ts";' }).toString();
+  const t = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+  await check("api: tags from the model are cleaned (JSON text or object, type first, no duplicates, ≤ 6, ≤ 30 chars)", async () => {
+    const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    assert(eq(t.cleanTags('Claro! {"type":"História","topics":["Entrevista"," Inglês ","entrevista"]}'), ["História", "Entrevista", "Inglês"]), "text JSON");
+    assert(eq(t.cleanTags({ type: "Dúvida", topics: ["a", "b", "c", "d", "e", "f", "g"] }), ["Dúvida", "a", "b", "c", "d", "e"]), "limit 6");
+    for (const bad of [null, "sem json", { type: 3, topics: "x" }]) assert(eq(t.cleanTags(bad), []), `bad ${JSON.stringify(bad)}`);
+    assert(eq(t.cleanTags({ type: "Sugestão", topics: ["x".repeat(40)] }), ["Sugestão", "x".repeat(30)]), "one long word");
+    assert(t.MAX_TAG === 30 && t.WHISPER.includes("whisper"), "constants");
+  });
+  await check("api: a job that arrives before Send commits is retried, not dropped; the dead-letter queue never marks a draft", async () => {
+    let row = { status: "uploading", kind: "audio", media_key: "media/j1/media", audio_key: null, transcript: null }, updates = [];
+    const DB = { prepare: (sql) => ({ bind: (...a) => ({ first: async () => (a[0] === "j1" ? row : null), run: async () => { updates.push(sql); return { meta: { changes: 1 } }; } }) }) };
+    const out = []; const msg = (id) => ({ body: { id }, attempts: 1, ack: () => out.push("ack"), retry: (o) => out.push(`retry ${o?.delaySeconds}`) });
+    const env = { DB, JOBS_RETRY_BASE_S: "0", MEDIA: { get: async () => null }, AI: { run: async () => { throw new Error("no AI here"); } } };
+    await t.queue({ queue: t.JOBS_QUEUE, messages: [msg("j1")] }, env);
+    assert(out.join() === "retry 0" && updates.length === 0, `uploading row → ${out.join()} ${updates.join()}`);
+    out.length = 0; await t.queue({ queue: t.JOBS_QUEUE, messages: [msg("gone")] }, env);
+    assert(out.join() === "ack", `deleted row → ${out.join()}`);
+    out.length = 0; await t.queue({ queue: t.DLQ, messages: [msg("j1")] }, env);
+    assert(out.join() === "ack" && /status != 'uploading'/.test(updates[0]), `dead-letter update: ${updates[0]}`);
+  });
+}
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
   const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts"; export * from "./src/api/sniff.ts";' }).toString();
@@ -241,7 +312,7 @@ await check("api: draft files — media again (same kind) and a video's audio tr
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway (originals kept until committed, retry works)", async () => {
+  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits)", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -259,13 +330,23 @@ await check("api: draft files — media again (same kind) and a video's audio tr
       first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
       run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading") { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
     }) }) };
+    const jobs = [], JOBS = { send: async (m) => { jobs.push(m); } };
     const app = new sm.Hono(); sm.registerSend(app);
-    const send = () => app.request("/api/drafts/d1/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ consent: true, photos: [1, 2] }) }, { DB, MEDIA });
+    const send = () => app.request("/api/drafts/d1/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ consent: true, photos: [1, 2] }) }, { DB, MEDIA, JOBS });
     const first = await send();
     assert(first.status === 503 && row.status === "uploading", `failed send → ${first.status}, status ${row.status}`);
+    assert(jobs.length === 0, "a failed send enqueued a transcript job");
     for (const k of ["media", "photo-1", "photo-2"]) assert(store.has(`incoming/d1/${k}`), `incoming/d1/${k} deleted by a failed send`);
     const retry = await send();
     assert(retry.status === 200 && row.status === "new" && row.media_key === "media/d1/media", `retry → ${retry.status}, status ${row.status}`);
+    assert(jobs.length === 1 && jobs[0].id === "d1", `jobs after send: ${JSON.stringify(jobs)}`);
+    // A queue outage never loses the job: Send answers 503 with nothing committed, and a retry enqueues and commits.
+    Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" }); for (const k of ["media", "photo-1", "photo-2"]) store.set(`incoming/d1/${k}`, store.get(`media/d1/${k}`));
+    const realSend = JOBS.send; JOBS.send = async () => { throw new Error("queue down"); };
+    const down = await send(); assert(down.status === 503 && row.status === "uploading", `send with the queue down → ${down.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`incoming/d1/${k}`)), "queue error deleted the originals");
+    JOBS.send = realSend; const back = await send();
+    assert(back.status === 200 && row.status === "new" && jobs.length === 2, `retry after the queue is back → ${back.status}, status ${row.status}, jobs ${jobs.length}`);
     assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
@@ -788,6 +869,21 @@ await check("ui: privacy page explains deletion by e-mail and that published vid
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
+});
+await check("ui: panel says \"Transcrevendo…\" before the job runs, then the transcript and tags; dead-lettered or rejected says \"Sem transcrição\"", async () => {
+  const id = await sendAudio(markedWav("SLOWJOB"), "Paula Teste");
+  const t = await shot("panel-transcribing", "/painel", { width: 1440, height: 900 });
+  const rowText = async (rid) => { const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
+    await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); const x = await p.locator(`li[data-id="${rid}"]`).innerText(); await ctx.close(); return x; };
+  assert(t.includes("Paula Teste"), "new message missing");
+  const before = await rowText(id); assert(before.includes("Transcrevendo…"), `row before the job: ${before}`);
+  assert(await until(async () => (await panelRow(id))?.transcript != null, 30000), "never transcribed");
+  const after = await rowText(id); assert(after.includes("organiza a semana") && after.includes("Rotina") && !after.includes("Transcrevendo"), `row after the job: ${after}`);
+  const failed = (await api("/api/panel/submissions")).body.find((x) => x.transcript_error);
+  assert(failed && (await rowText(failed.id)).includes("Sem transcrição"), "dead-lettered row text");
+  const rejected = (await api("/api/panel/submissions?status=rejected")).body[0];
+  assert(rejected && (await rowText(rejected.id)).includes("Sem transcrição"), "a rejected message says Transcrevendo…");
+  await shot("panel-transcribed", "/painel", { width: 1440, height: 900 });
 });
 await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
 await check("ui: record main flow", async () => {

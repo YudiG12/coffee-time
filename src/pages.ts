@@ -563,13 +563,13 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 })();
 </script>`);
 
-type Row = { id: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; tags: string };
+type Row = { id: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; transcript_error?: string | null; tags: string };
 const STATUS: Record<string, string> = { uploading: "Enviando", new: "Novo", favorite: "Favorito", used: "Usado", rejected: "Rejeitado" };
 export const panelPage = (rows: Row[]) => layout("Coffee Time · Painel", `<main class="wrap">
 <div class="eyebrow">Painel</div><h1 style="font-size:36px;font-weight:800;letter-spacing:-.03em;margin:4px 0 20px">Envios</h1>
 <ul style="list-style:none;padding:0;margin:0" id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" style="display:flex;gap:20px;padding:16px;border-bottom:1px solid var(--line)">
  <div style="width:200px;flex-shrink:0"><b>${esc(r.anonymous ? "Anônimo" : r.name || "Sem nome")}</b><div style="color:var(--subtle);font-size:13px">${esc(r.kind === "video" ? "vídeo" : "áudio")}</div></div>
- <div style="flex:1;color:var(--ink2)">${r.transcript ? `“${esc(r.transcript)}”` : `<i style="color:var(--subtle)">Transcrevendo…</i>`}
+ <div style="flex:1;color:var(--ink2)">${r.transcript ? `“${esc(r.transcript)}”` : `<i style="color:var(--subtle)">${r.transcript == null && !r.transcript_error && r.status !== "rejected" ? "Transcrevendo…" : "Sem transcrição"}</i>`}
   <div style="margin-top:8px">${(JSON.parse(r.tags) as string[]).map((t) => `<span class="pill">${esc(t)}</span>`).join("")}</div></div>
  <div style="width:96px;flex-shrink:0;color:var(--accent);font-size:13px;font-weight:600">${esc(STATUS[r.status] || r.status)}</div></li>`).join("")}</ul>
 </main>`);

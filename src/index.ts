@@ -1,9 +1,10 @@
-// Coffee Time Worker: public site, panel (Cloudflare Access) and MCP (Bearer token). See ARCHITECTURE.md.
+// Coffee Time Worker: public site, panel (Cloudflare Access), MCP (Bearer token) and the transcript queue consumer. See ARCHITECTURE.md.
 import { Hono } from "hono";
 import { safeEqual, verifyAccess } from "./auth";
 import { panelPage, privacyPage, startPage } from "./pages";
 import { registerDrafts } from "./api/drafts";
 import { registerSend } from "./api/send";
+import { queue, type Job } from "./jobs/transcribe";
 
 export type Env = {
   DB: D1Database;
@@ -18,6 +19,9 @@ export type Env = {
   R2_ACCOUNT_ID?: string;      // public var (wrangler.jsonc)
   R2_ACCESS_KEY_ID?: string;   // secret: R2 S3 API token, used only to sign upload URLs
   R2_SECRET_ACCESS_KEY?: string; // secret
+  AI: Ai;                      // Workers AI: Whisper + tags (ADR 0004)
+  JOBS: Queue<Job>;            // coffee-time-jobs: one transcript job per submission
+  JOBS_RETRY_BASE_S?: string;  // retry backoff base in seconds (default 30; verify sets 0)
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -58,7 +62,7 @@ const listSubmissions = (db: D1Database, f: { status?: string; tag?: string; q?:
   if (f.status) { where.push("status = ?"); args.push(f.status); }
   if (f.tag) { where.push("EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"); args.push(f.tag); }
   if (f.q) { where.push("transcript LIKE ?"); args.push(`%${f.q}%`); }
-  return db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, tags FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 200`).bind(...args).all<any>().then((r) => r.results);
+  return db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 200`).bind(...args).all<any>().then((r) => r.results);
 };
 
 app.get("/painel", async (c) => c.html(panelPage(await listSubmissions(c.env.DB))));
@@ -92,4 +96,4 @@ app.post("/mcp", async (c) => {
   return text({ error: `unknown tool ${name}` }, true);
 });
 
-export default app;
+export default { fetch: app.fetch, queue } satisfies ExportedHandler<Env, Job>;
