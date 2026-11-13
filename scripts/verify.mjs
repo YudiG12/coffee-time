@@ -403,6 +403,17 @@ await check("api: panel detail saves status and tags (cleaned), refuses bad valu
   const t = await post(path, { tags: ["  Dúvida ", "Idempotência", "idempotência", "", 7, "x".repeat(40), "Carreira"] });
   assert(t.status === 200 && JSON.stringify(t.body.tags) === JSON.stringify(["Dúvida", "Idempotência", "x".repeat(30), "Carreira"]), `tags → ${JSON.stringify(t.body)}`);
   assert(JSON.stringify(JSON.parse((await panelRow(id)).tags)) === JSON.stringify(t.body.tags) && (await panelRow(id)).status === "used", "tags not saved (or status lost)");
+  // Overlapping saves (status from one place, tags from another) each keep the other's change.
+  const before = (await panelRow(id)).tags;
+  for (let i = 0; i < 5; i++) {
+    const [a, b] = await Promise.all([post(path, { status: i % 2 ? "new" : "favorite" }), post(path, { tags: [...JSON.parse(before), `Extra ${i}`] })]);
+    assert(a.status === 200 && b.status === 200, `overlap → ${a.status} ${b.status}`);
+    const row = await panelRow(id);
+    assert(row.status === (i % 2 ? "new" : "favorite") && JSON.parse(row.tags).includes(`Extra ${i}`), `overlap ${i} lost a change: ${row.status} ${row.tags}`);
+    const m = await mcp("set_status", { id, status: "used" }); const t = await post(path, { tags: JSON.parse(before) });
+    assert(!m.body.result.isError && t.body.status === "used", `MCP status lost after a tag save: ${JSON.stringify(t.body)}`);
+  }
+  assert((await panelRow(id)).status === "used" && (await panelRow(id)).tags === before, "state after the overlap test");
   for (const b of [{ status: "deleted" }, { status: "rejected" }, { tags: "Kafka" }, {}]) { const r = await post(path, b); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`); }
   assert((await post("/api/panel/submissions/nope", { status: "favorite" })).status === 404, "unknown id accepted");
   const cross = await api(path, { method: "POST", headers: { origin: "https://evil.example" }, body: JSON.stringify({ status: "favorite" }) });
