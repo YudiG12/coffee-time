@@ -40,7 +40,41 @@ const files = await all(`/pulls/${PR}/files`);
 // The two ways a PR could merge itself past the guards: change the workflows that judge it, or delete an auth check.
 // Everything else merges alone; these wait for the owner.
 const workflows = files.filter((f) => /^\.github\/workflows\//.test(f.filename)).map((f) => f.filename);
-const authRemoved = files.some((f) => (f.patch || "").split("\n").some((l) => /^-(?!--)/.test(l) && /check\(\s*["'`]auth:/.test(l)));
+// Auth checks: any change inside the body of one of main's `auth:` checks (not only its declaration line) is held,
+// so a PR can't weaken an assertion and make the weaker version the trusted baseline. Ranges come from main's file;
+// a patch line touches a range when it removes or replaces an old line in it, or inserts between two of its lines.
+const VERIFY = "scripts/verify.mjs";
+const authRanges = async () => {
+  const f = await api(`/contents/${VERIFY}?ref=${pr.base.ref}`).catch(() => null);
+  if (!f) return [];
+  const lines = Buffer.from(f.content, "base64").toString("utf8").split("\n"), out = [];
+  lines.forEach((l, i) => {
+    if (!/check\(\s*["'`]auth:/.test(l)) return;
+    let depth = 0, j = i, opened = false;
+    for (; j < lines.length; j++) {
+      for (const ch of lines[j].replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "")) { if (ch === "(" || ch === "{") { depth++; opened = true; } else if (ch === ")" || ch === "}") depth--; }
+      if (opened && depth <= 0) break;
+    }
+    out.push([i + 1, j + 1]);
+  });
+  return out;
+};
+const touchesAuth = async (f) => {
+  if (!f.patch) return f.status === "removed" || f.status === "renamed";
+  const ranges = await authRanges();
+  let old = 0;
+  for (const l of f.patch.split("\n")) {
+    const h = /^@@ -(\d+)/.exec(l);
+    if (h) { old = Number(h[1]); continue; }
+    const inRange = (n) => ranges.some(([a, b]) => n >= a && n <= b);
+    if (l.startsWith("-")) { if (inRange(old)) return true; old++; }
+    else if (l.startsWith("+")) { if (/check\(\s*["'`]auth:/.test(l) ? false : inRange(old) && inRange(old - 1)) return true; }
+    else old++;
+  }
+  return false;
+};
+const verifyFile = files.find((f) => f.filename === VERIFY || f.previous_filename === VERIFY);
+const authRemoved = verifyFile ? await touchesAuth(verifyFile) : false;
 if (workflows.length || authRemoved) {
   // Released by an "/approve" comment from the owner written after the head commit (a new push needs a new one)
   const pushedAt = (await api(`/commits/${head}`)).commit.committer.date;
@@ -48,7 +82,7 @@ if (workflows.length || authRemoved) {
   const approved = comments.some((c) => c.user?.login === OWNER && /^\/approve\b/m.test(c.body || "") && c.created_at > pushedAt);
   if (!approved) {
     const mark = `<!-- held ${head} -->`;
-    const why = workflows.length ? `it changes CI workflows (${workflows.map((f) => `\`${f}\``).join(", ")})` : "it removes or rewrites an `auth:` check";
+    const why = workflows.length ? `it changes CI workflows (${workflows.map((f) => `\`${f}\``).join(", ")})` : "it changes an `auth:` check";
     if (!comments.some((c) => c.body?.includes(mark))) await comment(`${mark}\n⏸️ Held for @${OWNER}: ${why}. Comment \`/approve\` to let it merge.`);
     stop("held: workflows or auth checks changed");
   }
