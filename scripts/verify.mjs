@@ -86,6 +86,53 @@ await check("ui: start page (mobile) shows the record and upload buttons", async
   assert(t.includes("Gravar áudio") && t.includes("Envie um arquivo"), "buttons missing");
 });
 await check("ui: start page (desktop)", async () => { const t = await shot("start-desktop", "/", { width: 1440, height: 900 }); assert(t.includes("Envie uma mensagem"), "title missing"); });
+// No overlap between hero, vlog and the send card at any width (two columns start at 1024 px).
+// Also swept with a wide fallback font (DejaVu Sans), since sandboxes and CI render without Onest.
+await check("ui: start page has no overlap at intermediate widths", async () => {
+  const ctx = await browser.newContext(); await offline(ctx); const p = await ctx.newPage();
+  for (const font of [null, "DejaVu Sans"]) for (const w of [320, 768, 960, 1023, 1024, 1100, 1280, 1360, 1440, 1920]) {
+    const tag = `${w}px${font ? ` (${font})` : ""}`;
+    await p.setViewportSize({ width: w, height: 900 }); await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    if (font) await p.addStyleTag({ content: `body,body *{font-family:"${font}",sans-serif !important}` });
+    const r = await p.evaluate(() => {
+      const b = (s) => document.querySelector(s).getBoundingClientRect();
+      const over = (a, c) => a.left < c.right && c.left < a.right && a.top < c.bottom && c.top < a.bottom;
+      const card = b(".card"), h1 = document.querySelector(".hero h1"), hb = h1.getBoundingClientRect();
+      const rg = document.createRange(); rg.selectNodeContents(h1); const lines = [...rg.getClientRects()];
+      return { hero: [b(".hero h1"), b(".hero p"), b(".hero img"), b(".vlog"), ...lines].some((x) => over(x, card)),
+        clip: h1.scrollWidth > h1.clientWidth + 1 || lines.some((x) => x.right > hb.right + 1),
+        scroll: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert(!r.hero, `${tag}: send card overlaps the hero or vlog`); assert(!r.clip, `${tag}: title overflows`); assert(!r.scroll, `${tag}: horizontal scroll`);
+    if (w === 1024 && !font) await p.screenshot({ path: `${OUT}/start-1024.png`, fullPage: true });
+    if (w === 1440 && font) await p.screenshot({ path: `${OUT}/start-1440-fallback-font.png`, fullPage: true });
+  }
+  await ctx.close();
+});
+// Start page as in docs/design/*-1a-start.png: hero, tabs + hint, two buttons with icons, "Como fica no vlog".
+await check("ui: start page layout, tabs and icons (mobile + desktop)", async () => {
+  for (const [vp, desktop] of [[{ width: 390, height: 844 }, false], [{ width: 1440, height: 900 }, true]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    const t = await p.locator("body").innerText();
+    for (const s of ["Envie uma mensagem", "Uma história, uma pergunta", "Áudio", "Vídeo", "Áudio ou vídeo de até 90 segundos.", "Gravar áudio", "Envie um arquivo", "Como fica no vlog", "Eu ouço a mensagem no café"]) assert(t.toLowerCase().includes(s.toLowerCase()), `${vp.width}px: missing "${s}"`);
+    assert(!/\p{Extended_Pictographic}/u.test(t), `${vp.width}px: emoji in the page text`);
+    for (const sel of ["#record", "#upload", "#tab-audio", "#tab-video"]) assert(await p.locator(`${sel} svg`).count() === 1, `${sel} has no inline SVG icon`);
+    assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${vp.width}px: horizontal scroll`);
+    const box = async (s) => p.locator(s).boundingBox();
+    const [hero, card, vlog] = [await box(".hero"), await box(".card"), await box(".vlog")];
+    if (desktop) assert(card.x > hero.x + hero.width && vlog.y > hero.y && Math.abs(vlog.x - hero.x) < 2, "desktop: hero/vlog left, card right expected");
+    else assert(hero.y < card.y && card.y < vlog.y, "mobile: hero, card, vlog order expected");
+    await p.click("#tab-video");
+    assert((await p.locator("#record").innerText()).trim() === "Gravar vídeo", "Video tab did not switch the button");
+    assert((await p.getAttribute("#tab-video", "aria-selected")) === "true", "Video tab not selected");
+    await p.screenshot({ path: `${OUT}/start-${desktop ? "desktop" : "mobile"}-video.png`, fullPage: true });
+    await p.click("#tab-audio");
+    assert((await p.locator("#record").innerText()).trim() === "Gravar áudio", "Audio tab did not switch back");
+    await ctx.close();
+  }
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
@@ -94,7 +141,8 @@ await check("ui: no console errors", async () => assert(errors.length === 0, err
 await check("ui: record main flow", async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } } });
   await offline(ctx); const p = await ctx.newPage();
-  await p.goto(BASE + "/", { waitUntil: "networkidle" }); await p.waitForTimeout(1200);
+  await p.goto(BASE + "/", { waitUntil: "networkidle" }); await p.waitForTimeout(1000);
+  await p.click("#tab-video"); await p.waitForTimeout(800); await p.click("#tab-audio"); await p.waitForTimeout(600);
   await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); await p.waitForTimeout(1500);
   const vid = await p.video().path(); await ctx.close();
   try { execSync(`ffmpeg -y -loglevel error -i ${vid} -vf "fps=8,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" ${OUT}/flow.gif`); }

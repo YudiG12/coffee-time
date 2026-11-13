@@ -26,7 +26,7 @@ Never weaken an `auth:` check. A change that needs one changed stops and opens a
 ## Feature map
 | Feature | Files | Check in verify |
 |---|---|---|
-| Start page (pt-BR) | `src/pages.ts` `startPage`, `public/` | `ui: start page …` |
+| Start page (pt-BR): hero, Audio/Video tabs, buttons, "Como fica no vlog" | `src/pages.ts` `startPage`, `public/` | `ui: start page …`, `ui: start page layout, tabs and icons …` |
 | Panel list and filters | `src/index.ts` `/painel`, `/api/panel/submissions` | `api: panel …`, `ui: panel …` |
 | MCP tools | `src/index.ts` `/mcp` | `mcp: …` |
 | Auth (Access JWT, Bearer, dev) | `src/auth.ts`, `guard` in `src/index.ts` | `auth: …` |

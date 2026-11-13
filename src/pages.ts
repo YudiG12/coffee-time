@@ -15,18 +15,87 @@ const layout = (title: string, body: string) => `<!doctype html><html lang="pt-B
 .pill{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;background:#2C221A;border:1px solid var(--line2);color:var(--ink2);margin-right:6px}
 </style></head><body>${body}</body></html>`;
 
-export const startPage = () => layout("Coffee Time", `<main class="wrap" style="max-width:520px">
-<section style="display:flex;gap:14px;align-items:flex-start">
- <img src="/yudi.jpg" alt="Yudi Ganeko" width="96" height="96" style="border-radius:14px;box-shadow:0 0 48px 8px rgba(224,163,90,.35)">
- <div><h1 style="margin:0;font-size:24px;line-height:28px;font-weight:800;letter-spacing:-.03em">Envie uma mensagem para eu escutar nos vlogs! ${COFFEE}</h1>
- <p style="margin:6px 0 0;color:var(--muted);font-size:14px;line-height:20px">Uma história, uma pergunta, qualquer coisa. Abra seu coração <span style="color:#F2C94C">♥</span></p></div>
+// Inline SVG icons (Lucide-style, stroke = currentColor). Never emojis.
+const icon = (d: string, size = 20) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const MIC = `<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>`;
+const VIDEO = `<path d="m16 13 5.2 3.5a.5.5 0 0 0 .8-.4V7.9a.5.5 0 0 0-.8-.4L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/>`;
+const UPLOAD = `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>`;
+const HEART = `<svg class="heart" width="16" height="16" viewBox="0 0 24 24" fill="#F2C94C" aria-hidden="true"><path d="M12 21s-7.5-4.6-10-9.3C.4 8.6 2.3 4.5 6.2 4.5c2.3 0 3.8 1.3 4.8 2.8 1-1.5 2.5-2.8 4.8-2.8 3.9 0 5.8 4.1 4.2 7.2C19.5 16.4 12 21 12 21Z"/></svg>`;
+const PLAY = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.8l-12-7.5A1 1 0 0 0 7 4.5Z"/></svg>`;
+
+// Start page: docs/design/mobile-1a-start.png and desktop-1a-start.png.
+// Mobile stacks hero, card, vlog; desktop puts the hero and vlog on the left and the card on the right.
+export const startPage = () => layout("Coffee Time", `<style>
+.start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
+.hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
+.hero img{width:96px;height:96px;flex-shrink:0;border-radius:14px;object-fit:cover;box-shadow:0 0 56px 14px rgba(224,163,90,.22)}
+.hero h1{margin:4px 0 0;font-size:24px;line-height:26px;font-weight:800;letter-spacing:-.03em}
+.hero h1 svg{vertical-align:-3px;color:var(--accent)}
+.hero p{margin:10px 0 0;color:var(--muted);font-size:14px;line-height:22px}
+.heart{vertical-align:-2px}
+.card{grid-area:card}
+.tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:3px;border:1px solid var(--line2);border-radius:4px;background:var(--surface)}
+.tab{display:flex;align-items:center;justify-content:center;gap:8px;padding:9px;border:0;border-radius:3px;background:transparent;color:var(--muted);font:600 16px/20px Onest,system-ui,sans-serif;cursor:pointer}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--on-accent)}
+.hint{text-align:center;color:var(--subtle);font-size:13px;margin:8px 0 18px}
+.actions{display:flex;flex-direction:column;gap:10px}
+.btn.primary{padding:18px;font-size:17px}.btn.secondary{padding:13px;font-size:15px}
+.vlog{grid-area:vlog;margin-top:12px}
+.vlog .row{display:flex;gap:14px;align-items:center;margin-top:12px}
+.thumb{position:relative;width:150px;aspect-ratio:16/10;flex-shrink:0;border:1px solid var(--line2);border-radius:4px;background:linear-gradient(135deg,#5A3F28 0%,#3A2A1D 50%,#241B14 100%);display:flex;align-items:center;justify-content:center}
+.play{width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center}
+.vlog p{margin:0;color:var(--muted);font-size:14px;line-height:21px}
+.hero > div{min-width:0}
+@media (min-width:1024px){
+ .start{max-width:1292px;grid-template-columns:minmax(0,1fr) minmax(360px,460px);grid-template-areas:"hero card" "vlog card";column-gap:clamp(40px,5.5vw,80px);row-gap:40px;align-content:center;padding:48px 40px}
+ .hero{gap:clamp(16px,1.7vw,24px)}.hero img{width:clamp(120px,11.8vw,170px);height:clamp(120px,11.8vw,170px);border-radius:18px;box-shadow:0 0 90px 24px rgba(224,163,90,.2)}
+ .hero h1{font-size:clamp(32px,3.06vw,44px);line-height:1.1}.hero h1 svg{width:.86em;height:.86em;vertical-align:-.1em}
+ .hero p{font-size:18px;line-height:28px;margin-top:14px;max-width:460px}
+ .card{align-self:center;padding:24px;border:1px solid var(--line2);border-radius:4px;background:#1C1611}
+ .tab{font-size:15px;padding:8px}.hint{margin:6px 0 14px}
+ .btn.primary{padding:15px;font-size:17px}.btn.secondary{padding:12px;font-size:15px}
+ .vlog{margin-top:0}.thumb{width:clamp(180px,16.7vw,240px)}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}
+}
+</style>
+<main class="start">
+<section class="hero">
+ <img src="/yudi.jpg" alt="Yudi Ganeko" width="170" height="170">
+ <div><h1>Envie uma mensagem<br>para eu escutar<br>nos vlogs! ${COFFEE}</h1>
+ <p>Uma história, uma pergunta, qualquer coisa. Abra seu <span style="white-space:nowrap">coração ${HEART}</span></p></div>
 </section>
-<p style="text-align:center;color:var(--subtle);font-size:13px;margin:24px 0 10px">Áudio ou vídeo de até 90 segundos.</p>
-<div style="display:flex;flex-direction:column;gap:10px">
- <button class="btn primary" id="record">Gravar áudio</button>
- <button class="btn secondary" id="upload">Envie um arquivo</button>
-</div>
-</main>`);
+<section class="card" aria-label="Enviar mensagem">
+ <div class="tabs" role="tablist">
+  <button class="tab" role="tab" id="tab-audio" data-kind="audio" aria-selected="true">${icon(MIC, 18)}Áudio</button>
+  <button class="tab" role="tab" id="tab-video" data-kind="video" aria-selected="false">${icon(VIDEO, 18)}Vídeo</button>
+ </div>
+ <p class="hint">Áudio ou vídeo de até 90 segundos.</p>
+ <div class="actions">
+  <button class="btn primary" id="record" data-kind="audio"><span id="record-icon">${icon(MIC, 22)}</span><span id="record-label">Gravar áudio</span></button>
+  <button class="btn secondary" id="upload">${icon(UPLOAD, 18)}Envie um arquivo</button>
+ </div>
+</section>
+<section class="vlog">
+ <div class="eyebrow">Como fica no vlog</div>
+ <div class="row">
+  <div class="thumb" role="img" aria-label="Prévia do vlog"><span class="play">${PLAY}</span></div>
+  <p>Eu ouço a mensagem no café e respondo ali mesmo.</p>
+ </div>
+</section>
+</main>
+<script>
+(() => {
+ const icons = { audio: ${JSON.stringify(icon(MIC, 22))}, video: ${JSON.stringify(icon(VIDEO, 22))} };
+ const labels = { audio: "Gravar áudio", video: "Gravar vídeo" };
+ const tabs = document.querySelectorAll(".tab"), rec = document.getElementById("record");
+ tabs.forEach((t) => t.addEventListener("click", () => {
+  const kind = t.dataset.kind;
+  tabs.forEach((x) => x.setAttribute("aria-selected", String(x === t)));
+  rec.dataset.kind = kind;
+  document.getElementById("record-icon").innerHTML = icons[kind];
+  document.getElementById("record-label").textContent = labels[kind];
+ }));
+})();
+</script>`);
 
 type Row = { id: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; tags: string };
 const STATUS: Record<string, string> = { uploading: "Enviando", new: "Novo", favorite: "Favorito", used: "Usado", rejected: "Rejeitado" };
