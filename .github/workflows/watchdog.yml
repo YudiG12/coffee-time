@@ -1,0 +1,19 @@
+name: Watchdog
+# Every hour: frees dead claims, re-asks Codex, tells the owner about anything that stalls, checks production.
+on:
+  schedule: [{ cron: "17 * * * *" }]
+  workflow_dispatch:
+permissions: { contents: read, issues: write, pull-requests: write }
+concurrency: watchdog
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROD_URL: ${{ vars.PROD_URL }}
+        run: node .github/scripts/watchdog.mjs

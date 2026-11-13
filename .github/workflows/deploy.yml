@@ -2,8 +2,16 @@ name: Deploy
 on:
   push: { branches: [main] }
   workflow_dispatch:
+    inputs:
+      simulate:
+        description: "Fire drill: fail on purpose (health | auth) to test rollback and the issue it opens"
+        required: false
+        default: ""
 concurrency: deploy
 permissions: { contents: read, issues: write }
+defaults:
+  run:
+    shell: bash  # explicit bash = -eo pipefail in every step: a failing command can't hide behind a pipe (tee)
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -11,45 +19,71 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SIMULATE: ${{ inputs.simulate }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
+        with: { node-version-file: .nvmrc, cache: npm }
       - run: npm ci
       - run: sed -i "s/REPLACE_WITH_YOUR_D1_ID/${{ secrets.D1_DATABASE_ID }}/" wrangler.jsonc
-      # Creates queues/buckets that wrangler.jsonc names but don't exist yet (a new binding can't break the deploy).
-      - run: node scripts/provision.mjs
-      - run: npm run db:migrate
-      # The browser PUTs straight to signed R2 URLs (ADR 0002): without this rule the preflight fails and no upload works.
-      - run: npx wrangler r2 bucket cors set coffee-time-media --file r2-cors.json --force
+      - name: Credentials
+        run: |
+          [ "$SIMULATE" != auth ] || { echo "Authentication error [code: 10000] (simulated)" | tee -a run.log; exit 1; }
+          npx wrangler whoami 2>&1 | tee -a run.log
+      # Creates the queues/buckets wrangler.jsonc names but that don't exist yet.
+      - run: node scripts/provision.mjs 2>&1 | tee -a run.log
+      # Point-in-time restore target, recorded before any migration runs.
+      - name: D1 bookmark
+        run: |
+          db=$(node -e 'const c=JSON.parse(require("fs").readFileSync("wrangler.jsonc","utf8").replace(/^\s*\/\/.*$/gm,"").replace(/,(\s*[}\]])/g,"$1"));process.stdout.write(c.d1_databases?.[0]?.database_name||"")')
+          [ -z "$db" ] || { echo "### D1 bookmark before migrations"; npx wrangler d1 time-travel info "$db" 2>&1; } | tee -a run.log >> "$GITHUB_STEP_SUMMARY"
+      - run: npm run db:migrate 2>&1 | tee -a run.log
+      # Signed browser uploads need the bucket CORS rule (applied to every bucket when r2-cors.json exists).
+      - name: R2 CORS
+        if: hashFiles('r2-cors.json') != ''
+        run: |
+          for b in $(node -e 'const c=JSON.parse(require("fs").readFileSync("wrangler.jsonc","utf8").replace(/^\s*\/\/.*$/gm,"").replace(/,(\s*[}\]])/g,"$1"));console.log((c.r2_buckets||[]).map(b=>b.bucket_name).join(" "))'); do
+            npx wrangler r2 bucket cors set "$b" --file r2-cors.json --force 2>&1 | tee -a run.log
+          done
       - id: deploy
         run: |
-          set -o pipefail  # without it, tee hides a failed deploy
-          npm run deploy 2>&1 | tee deploy.log
+          npm run deploy 2>&1 | tee deploy.log | tee -a run.log
           echo "url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)" >> "$GITHUB_OUTPUT"
-      # Smoke test on production: the bindings the app needs really work (local verify simulates them).
-      - name: Production health
+      # Smoke test on production: the bindings and secrets the app needs really work (local verify only simulates them).
+      - id: health
+        name: Production health
         run: |
           url="${{ steps.deploy.outputs.url }}"
           [ -n "$url" ] || { echo "no workers.dev URL in the deploy output"; exit 1; }
+          [ "$SIMULATE" != health ] || { echo "health failed (simulated)"; exit 1; }
           for i in 1 2 3 4 5; do
-            # the old version answers /api/health too: require the deep fields so a stale deploy fails
-            body=$(curl -fsS "$url/api/health?deep=1") && echo "$body" | grep -q '"jobs"' && { echo "$body"; exit 0; }
+            # the old version answers /api/health too: the deep fields must be there
+            body=$(curl -fsS "$url/api/health?deep=1") && echo "$body" | grep -q '"deep":true' && echo "$body" | grep -q '"ok":true' && { echo "$body"; exit 0; }
             sleep 6
           done
-          echo "health failed: $(curl -sS "$url/api/health?deep=1")"; exit 1
-      # A failed deploy becomes work for the builder (label deploy-failed, taken before the queue) and blocks auto-merge.
-      - name: Open a deploy-failed issue
+          echo "health failed: $(curl -sS "$url/api/health?deep=1")" | tee -a run.log; exit 1
+      # Broken version live = worst state. Go back to the previous one right away; the builder fixes forward.
+      - name: Roll back
+        if: failure() && steps.deploy.outcome == 'success'
+        run: npx wrangler rollback --message "health failed at ${GITHUB_SHA::7}" -y 2>&1 | tee -a run.log || echo "rollback failed" | tee -a run.log
+      # Code/config failure → work for the builder (deploy-failed, before the queue, blocks auto-merge).
+      # Credential failure → the builder can't fix it: needs-owner and a mention.
+      - name: Open an issue
         if: failure()
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          owner="${GITHUB_REPOSITORY%%/*}"
+          if grep -qiE 'CREDENTIAL FAILURE|authentication error|\[code: (6111|9106|9109|10000|10001)\]|invalid api token|token.*expired|\b(401|403)\b' run.log 2>/dev/null; then
+            labels=(--label deploy-failed --label needs-owner); who="@$owner: this needs you — Cloudflare rejected the credentials (expired/revoked token or missing permission). Renew \`CLOUDFLARE_API_TOKEN\` (\`cf-token-for-repo\`) and re-run the deploy."
+          else
+            labels=(--label agent --label deploy-failed); who="Builder: read the failed step (\`gh run view --log-failed\`), fix the cause in the repo and make the deploy green."
+          fi
           open=$(gh issue list --label deploy-failed --state open --json number -q '.[0].number')
           if [ -n "$open" ]; then gh issue comment "$open" --body "Deploy failed again at ${GITHUB_SHA::7}: $run"; exit 0; fi
-          gh issue create --label agent --label deploy-failed --title "Fix the failing production deploy" --body "$(printf '%s\n' \
-            '## What' "The deploy of \`main\` at ${GITHUB_SHA::7} failed: $run" \
-            'Read the failed step log (`gh run view --log-failed`), fix the cause in the repo (config, provisioning, code) and make the deploy green.' \
-            'Auto-merge is blocked for every other PR until a deploy of `main` succeeds.' \
+          gh issue create "${labels[@]}" --title "Fix the failing production deploy" --body "$(printf '%s\n' \
+            '## What' "The deploy of \`main\` at ${GITHUB_SHA::7} failed: $run" "$who" \
+            'Production was rolled back to the previous version if the new one was already live. Auto-merge is blocked for every other PR until a deploy of `main` succeeds.' \
             '## Done when…' '- [ ] the deploy workflow on main is green, including "Production health"' \
-            '- [ ] the cause is covered (provision step, verify check or AGENTS.md rule) so it cannot happen again' \
+            '- [ ] the cause is covered (CI check, provision step, verify check or AGENTS.md rule) so it cannot happen again' \
             '## Out of scope' 'Unrelated features.')"

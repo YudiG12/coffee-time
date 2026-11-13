@@ -5,6 +5,7 @@
 // Each Codex verdict is bound to the commit it reviewed; only the exact Codex bot identity counts.
 const { GITHUB_REPOSITORY: R, GH_TOKEN, PR, DRY_RUN } = process.env;
 const CODEX = "chatgpt-codex-connector[bot]";
+const OWNER = R.split("/")[0];
 // Sensitive = could loosen security. Only flagged 🔒 in the changelog, never blocks.
 const SENSITIVE_PATH = /^(wrangler.*\.jsonc|src\/auth\.ts|SECURITY\.md|\.github\/|migrations\/)/;
 const SENSITIVE_CODE = /cf-access|ACCESS_|AGENT_TOKEN|DEV_OPEN|workers_dev|preview_urls|"routes?"\s*:|custom_domain|Access-Control|cors|safeEqual|unauthorized|guard|turnstile|presign|signed url/i;
@@ -35,6 +36,60 @@ if (pr.head.repo?.full_name !== R) {
   stop(`PR ${PR} from ${pr.head.repo?.full_name ?? "a deleted fork"}: held for the owner`);
 }
 const head = pr.head.sha;
+const files = await all(`/pulls/${PR}/files`);
+// The two ways a PR could merge itself past the guards: change the workflows that judge it, or delete an auth check.
+// Everything else merges alone; these wait for the owner.
+// both paths: renaming a workflow out of .github/workflows/ disables it just like editing it
+const workflows = files.filter((f) => [f.filename, f.previous_filename].some((n) => /^\.github\/workflows\//.test(n || ""))).map((f) => f.previous_filename || f.filename);
+// Auth checks: any change inside the body of one of main's `auth:` checks (not only its declaration line) is held,
+// so a PR can't weaken an assertion and make the weaker version the trusted baseline. Ranges come from main's file;
+// a patch line touches a range when it removes or replaces an old line in it, or inserts between two of its lines.
+const VERIFY = "scripts/verify.mjs";
+const authRanges = async () => {
+  const f = await api(`/contents/${VERIFY}?ref=${pr.base.ref}`).catch(() => null);
+  if (!f) return [];
+  const lines = Buffer.from(f.content, "base64").toString("utf8").split("\n"), out = [];
+  lines.forEach((l, i) => {
+    if (!/check\(\s*["'`]auth:/.test(l)) return;
+    let depth = 0, j = i, opened = false;
+    for (; j < lines.length; j++) {
+      for (const ch of lines[j].replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "")) { if (ch === "(" || ch === "{") { depth++; opened = true; } else if (ch === ")" || ch === "}") depth--; }
+      if (opened && depth <= 0) break;
+    }
+    out.push([i + 1, j + 1]);
+  });
+  return out;
+};
+const touchesAuth = async (f) => {
+  // Moving or deleting the verifier hides every auth check from CI, whatever the patch says
+  if (f.status === "removed" || f.status === "renamed" || f.filename !== VERIFY) return true;
+  if (!f.patch) return true; // too large to diff: assume it touches auth
+  const ranges = await authRanges();
+  let old = 0;
+  for (const l of f.patch.split("\n")) {
+    const h = /^@@ -(\d+)/.exec(l);
+    if (h) { old = Number(h[1]); continue; }
+    const inRange = (n) => ranges.some(([a, b]) => n >= a && n <= b);
+    if (l.startsWith("-")) { if (inRange(old)) return true; old++; }
+    else if (l.startsWith("+")) { if (/check\(\s*["'`]auth:/.test(l) ? false : inRange(old) && inRange(old - 1)) return true; }
+    else old++;
+  }
+  return false;
+};
+const verifyFile = files.find((f) => f.filename === VERIFY || f.previous_filename === VERIFY);
+const authRemoved = verifyFile ? await touchesAuth(verifyFile) : false;
+if (workflows.length || authRemoved) {
+  // Released by an "/approve" comment from the owner written after the head commit (a new push needs a new one)
+  const pushedAt = (await api(`/commits/${head}`)).commit.committer.date;
+  const comments = await all(`/issues/${PR}/comments`);
+  const approved = comments.some((c) => c.user?.login === OWNER && /^\/approve\b/m.test(c.body || "") && c.created_at > pushedAt);
+  if (!approved) {
+    const mark = `<!-- held ${head} -->`;
+    const why = workflows.length ? `it changes CI workflows (${workflows.map((f) => `\`${f}\``).join(", ")})` : "it changes an `auth:` check";
+    if (!comments.some((c) => c.body?.includes(mark))) await comment(`${mark}\n⏸️ Held for @${OWNER}: ${why}. Comment \`/approve\` to let it merge.`);
+    stop("held: workflows or auth checks changed");
+  }
+}
 
 // Verdicts: one per Codex review/comment, each tied to the commit it names
 const PASS = /Didn't find any major issues|VERDICT:\s*PASS/i, FAIL = /VERDICT:\s*FAIL/i;
@@ -68,28 +123,36 @@ for (const c of await all(`/pulls/${PR}/comments`)) {
 if ((repeated || failedShas.size >= MAX_ROUNDS) && !latest?.pass) {
   await label("circuit-breaker");
   const why = repeated ? `the same finding came back after a fix (\`${repeated}\`)` : `Codex failed ${failedShas.size} commits in a row`;
-  await comment(`🛑 **Circuit breaker:** ${why}. Stopping here — @YudiG12 please take a look.`);
+  await comment(`🛑 **Circuit breaker:** ${why}. Stopping here — @${OWNER} please take a look.`);
   stop("circuit breaker");
 }
 
 // Sensitive changes no longer wait: they are only flagged (🔒) in the release and changelog
-const files = await all(`/pulls/${PR}/files`);
 const sensitive = files.filter((f) => !TEST_ONLY.test(f.filename)).filter((f) => SENSITIVE_PATH.test(f.filename) || (f.patch || "").split("\n").some((l) => /^[+-]/.test(l) && SENSITIVE_CODE.test(l))).map((f) => f.filename);
 
 const runs = await api(`/commits/${head}/check-runs`);
 const ci = runs.check_runs.find((c) => c.name === "check")?.conclusion;
 if (ci !== "success") stop(`CI: ${ci ?? "pending"}`);
 if (!latest?.pass) stop("no Codex PASS for head commit");
-// Production first: while the last deploy of main failed, only the PR that fixes it may merge.
+// Production first: while production is broken — the last deploy of main failed, or any deploy-failed issue is open
+// (the watchdog opens one when health fails between deploys) — only a PR that closes one of those issues may merge.
 const deploys = await api(`/actions/workflows/deploy.yml/runs?branch=main&per_page=5`).catch(() => null);
 const lastDeploy = deploys?.workflow_runs?.find((r) => r.status === "completed");
-if (lastDeploy?.conclusion === "failure") {
-  const broken = (await all(`/issues?state=open&labels=deploy-failed`)).map((i) => i.number);
+const broken = (await all(`/issues?state=open&labels=deploy-failed`)).filter((i) => !i.pull_request).map((i) => i.number);
+if (lastDeploy?.conclusion === "failure" || broken.length) {
   const fixes = [...(pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map((m) => Number(m[1]));
-  if (!fixes.some((n) => broken.includes(n))) stop(`main deploy is failing (${lastDeploy.html_url}): only the deploy-failed fix may merge`);
+  if (!fixes.some((n) => broken.includes(n))) stop(`production is broken (${broken.length ? `issue #${broken.join(", #")}` : lastDeploy.html_url}): only the deploy-failed fix may merge`);
 }
 
-await api(`/pulls/${PR}/merge`, { method: "PUT", body: JSON.stringify({ merge_method: "squash", sha: head }) });
+try {
+  await api(`/pulls/${PR}/merge`, { method: "PUT", body: JSON.stringify({ merge_method: "squash", sha: head }) });
+} catch (e) {
+  // Conflict or a moved base: tell the builder (it fixes "merge failed" comments), once per head commit
+  const mark = `<!-- merge-failed ${head} -->`;
+  const done = (await all(`/issues/${PR}/comments`)).some((c) => c.body?.includes(mark));
+  if (!done) await comment(`${mark}\n⚠️ **Merge failed** at \`${head.slice(0, 7)}\`: ${e.message.slice(0, 300)}\nBuilder: rebase on main, resolve, push.`);
+  stop(`merge failed: ${e.message}`);
+}
 await api(`/git/refs/heads/${pr.head.ref}`, { method: "DELETE" }).catch(() => {});
 // Merges made with GITHUB_TOKEN don't auto-close the linked issues: close "Closes #N" explicitly
 for (const [, n] of (pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)) {

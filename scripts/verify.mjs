@@ -12,11 +12,16 @@ import zlib from "node:zlib";
 
 const freePort = () => new Promise((r) => { const s = createServer().listen(0, () => { const p = s.address().port; s.close(() => r(p)); }); });
 const PORT = await freePort();
-const BASE = `http://localhost:${PORT}`, STATE = ".verify/state", OUT = "verify-out";
+// --only=auth: runs only the checks whose name starts with that prefix (CI runs main's auth checks against each PR);
+// --out=DIR writes the report elsewhere so it doesn't overwrite the PR's own verify-out/.
+const arg = (k) => process.argv.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
+const ONLY = arg("only");
+const BASE = `http://localhost:${PORT}`, STATE = ".verify/state", OUT = arg("out") || "verify-out";
 const keep = process.argv.includes("--keep");
 const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] }).toString();
 const results = [];
 const check = async (name, fn) => {
+  if (ONLY && !name.startsWith(ONLY)) return;
   try { await fn(); results.push({ name, ok: true }); console.log(`PASS  ${name}`); }
   catch (e) { results.push({ name, ok: false, error: String(e.message || e) }); console.log(`FAIL  ${name}: ${e.message || e}`); }
 };
@@ -73,9 +78,16 @@ const api = async (path, init) => { const r = await fetch(BASE + path, { ...init
 const mcp = (name, args) => api("/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
 const mcpData = async (name, args) => { const r = await mcp(name, args); assert(r.body?.result && !r.body.result.isError, JSON.stringify(r.body).slice(0, 200)); return JSON.parse(r.body.result.content[0].text); };
 
+if (!ONLY) { // feature checks and screens; --only=auth: skips straight to the auth servers below
 // ---- API / MCP ----
 await check("api: health", async () => { const r = await api("/api/health"); assert(r.status === 200 && r.body.ok, `status ${r.status}`); });
-await check("api: deep health reports db, media, jobs and signing", async () => { const r = await api("/api/health?deep=1"); assert(["db", "media", "jobs", "signing"].every((k) => k in r.body), JSON.stringify(r.body)); assert(r.body.db && r.body.media && r.body.jobs, JSON.stringify(r.body)); });
+await check("api: deep health reports db, media, jobs, ai, signing and missing secrets", async () => {
+  const r = await api("/api/health?deep=1");
+  assert(r.body?.deep === true && ["db", "media", "jobs", "ai", "signing"].every((k) => k in r.body) && Array.isArray(r.body.missing), JSON.stringify(r.body));
+  assert(r.body.db && r.body.media && r.body.jobs && r.body.ai, JSON.stringify(r.body));
+  // local dev has no S3 keys / Access: the names show up as missing, values never do
+  assert(r.body.missing.includes("R2_SECRET_ACCESS_KEY") && !JSON.stringify(r.body).includes(TS_PASS), JSON.stringify(r.body));
+});
 await check("api: panel lists the demo messages", async () => {
   const r = await api("/api/panel/submissions"); assert(r.status === 200 && r.body.length === 3, `got ${r.status} ${r.body?.length}`);
 });
@@ -97,8 +109,8 @@ await check("mcp: set_status updates and rejects bad values", async () => {
 });
 
 // ---- Drafts and upload (ADR 0002). Each caller gets its own fake IP so the per-IP rate limit is tested in isolation.
-let ipN = 0; const fakeIp = () => (++ipN, `10.${(ipN >> 16) & 255}.${(ipN >> 8) & 255}.${ipN & 255}`);
-const draft = (body, ip = fakeIp(), base = BASE) => fetch(base + "/api/drafts", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip }, body: JSON.stringify(body) })
+var ipN = 0; var fakeIp = () => (++ipN, `10.${(ipN >> 16) & 255}.${(ipN >> 8) & 255}.${ipN & 255}`);
+var draft = (body, ip = fakeIp(), base = BASE) => fetch(base + "/api/drafts", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip }, body: JSON.stringify(body) })
   .then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
 const r2get = (key) => { const f = `.verify/r2-${Date.now()}`; sh(`npx wrangler r2 object get "coffee-time-media/${key}" --local --persist-to ${STATE} --file ${f}`); return readFileSync(f); };
 const VIDEO_FX = readFileSync("scripts/fixtures/video-3s-1080p.webm");
@@ -313,8 +325,9 @@ await check("api: R2 CORS rule (r2-cors.json) allows PUT/POST/GET/HEAD and any h
   const ok = rules.some((r) => ["PUT", "POST", "GET", "HEAD"].every((x) => r.allowed?.methods?.includes(x)) && r.allowed?.origins?.length > 0
     && r.allowed?.headers?.includes("*") && r.exposeHeaders?.includes("ETag"));
   assert(ok, `rule: ${JSON.stringify(rules)}`);
-  const deploy = readFileSync(".github/workflows/deploy.yml", "utf8"), bucket = prod.r2_buckets?.[0]?.bucket_name;
-  assert(new RegExp(`wrangler r2 bucket cors set ${bucket} --file r2-cors\\.json --force`).test(deploy), `deploy.yml does not apply the rule to ${bucket}`);
+  // deploy.yml applies r2-cors.json to every bucket in wrangler.jsonc (r2_buckets), before the Worker deploys
+  const deploy = readFileSync(".github/workflows/deploy.yml", "utf8");
+  assert(prod.r2_buckets?.length && /r2_buckets[\s\S]*wrangler r2 bucket cors set "\$b" --file r2-cors\.json --force/.test(deploy), "deploy.yml does not apply the rule to every R2 bucket");
   assert(deploy.indexOf("r2 bucket cors set") < deploy.indexOf("npm run deploy"), "CORS must be set before the Worker deploys");
 });
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
@@ -748,7 +761,9 @@ await check("ui: record video with a fake camera: live preview, stop, Vídeo pro
     const d = await p.evaluate(() => ({ ...document.getElementById("vready").dataset }));
     assert(d.source === "record" && Number(d.duration) > 2.5 && Number(d.duration) < 5, `${name}: video duration ${d.duration} (${d.source})`);
     assert(Number(d.bytes) > 1000 && /^video\//.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
-    assert((await p.locator("#vdur").innerText()).trim() === "0:03", `${name}: video length ${await p.locator("#vdur").innerText()}`);
+    // The label must match the recorded duration (a slow machine records ~3–4.9 s, so no exact "0:03")
+    const vdur = (await p.locator("#vdur").innerText()).trim(), sec = Number(d.duration);
+    assert([Math.floor(sec), Math.round(sec)].some((n) => vdur === `0:0${n}`), `${name}: video length ${vdur} for ${d.duration} s`);
     assert(!(await p.locator("#ready").isVisible()) && (await p.getAttribute("main", "data-media")) === "video", `${name}: not in the video ready state`);
     const live = await p.evaluate(() => window.__streams.flatMap((s) => s.getTracks()).filter((x) => x.readyState === "live").length);
     assert(live === 0, `${name}: ${live} camera/microphone track(s) still live after stop`);
@@ -1371,6 +1386,7 @@ await check("ui: record main flow", async () => {
   catch { console.log("      (ffmpeg not found: kept webm only)"); }
 });
 await browser.close();
+} // end of feature checks and screens
 
 // ---- Auth: a second server configured like production (agent token set). Guards the "no human review" pipeline:
 // a PR that loosens auth fails here instead of merging.
@@ -1464,7 +1480,7 @@ await browser.close();
 }
 
 const failed = results.filter((r) => !r.ok);
-writeFileSync(`${OUT}/report.json`, JSON.stringify({ verdict: failed.length ? "FAIL" : "PASS", results }, null, 2));
+writeFileSync(`${OUT}/report.json`, JSON.stringify({ verdict: failed.length || !results.length ? "FAIL" : "PASS", results }, null, 2));
 if (failed.length) writeFileSync(`${OUT}/server.log`, log);
 console.log(`\n${failed.length ? "FAIL" : "PASS"}  ${results.length - failed.length}/${results.length} checks · screenshots in ${OUT}/`);
 if (keep) { console.log(`server running at ${BASE} (Ctrl+C to stop)`); } else { stop(); process.exit(failed.length ? 1 : 0); }

@@ -5,3 +5,6 @@ node_modules/
 verify-out/
 .DS_Store
 public/media.js
+.verify-out-auth
+.dry-run
+scripts/verify.main.mjs

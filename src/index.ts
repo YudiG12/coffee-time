@@ -36,6 +36,8 @@ app.get("/", (c) => {
   const max = Number(c.req.query("max"));
   return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90, c.env.TURNSTILE_SITE_KEY));
 });
+// Every secret production needs. The deep health reports any that is missing; add new ones here.
+export const REQUIRED_SECRETS = ["AGENT_TOKEN", "TURNSTILE_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD"] as const;
 // ?deep=1: checks the bindings production needs (D1 query, R2 read, queue binding, upload signing secrets).
 // deploy.yml calls it right after deploying; a failure opens a `deploy-failed` issue.
 app.get("/api/health", async (c) => {
@@ -45,10 +47,14 @@ app.get("/api/health", async (c) => {
     db: await run(() => c.env.DB.prepare("SELECT 1").first()),
     media: await run(() => c.env.MEDIA.head("health-probe")),
     jobs: typeof c.env.JOBS?.send === "function",
+    ai: typeof c.env.AI?.run === "function",
     signing: Boolean(c.env.R2_ACCESS_KEY_ID && c.env.R2_SECRET_ACCESS_KEY && c.env.R2_ACCOUNT_ID),
+    // names only, never values: which required secret is missing in production
+    missing: REQUIRED_SECRETS.filter((k) => !(c.env as unknown as Record<string, unknown>)[k]),
   };
-  const ok = Object.values(checks).every(Boolean);
-  return c.json({ ok, ...checks }, ok ? 200 : 503);
+  const ok = Object.entries(checks).every(([k, v]) => (k === "missing" ? !(v as string[]).length : Boolean(v)));
+  // deep: true lets the deploy tell this answer from an old version's shallow one
+  return c.json({ deep: true, ok, ...checks }, ok ? 200 : 503);
 });
 registerDrafts(app);
 registerSend(app);
