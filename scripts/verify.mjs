@@ -101,6 +101,12 @@ await check("api: the 6th draft in a minute from one IP → 429, other IPs unaff
   const sixth = await draft(b, ip); assert(sixth.status === 429, `6th → ${sixth.status}`);
   const other = await draft(b); assert(other.status === 201, `other IP → ${other.status}`);
 });
+await check("api: 20 simultaneous drafts from one IP → exactly 5 accepted, the rest 429", async () => {
+  const ip = fakeIp(), b = { kind: "audio", type: "audio/wav", size: 10, token: "x" };
+  const rs = await Promise.all(Array.from({ length: 20 }, () => draft(b, ip)));
+  const ok = rs.filter((r) => r.status === 201).length, limited = rs.filter((r) => r.status === 429).length;
+  assert(ok === 5 && limited === 15, `201 × ${ok}, 429 × ${limited}`);
+});
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
   const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts";' }).toString();
@@ -412,6 +418,25 @@ await check("ui: a failed upload says so and \"Tentar de novo\" finishes it", as
   await p.screenshot({ path: `${OUT}/upload-error-mobile.png`, fullPage: true });
   fail = false; await p.click("#up-retry");
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await ctx.close();
+});
+await check("ui: replacing a file while its upload waits to retry never resends the old file", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); // the 503 below logs a console error on purpose
+  let firstUrl = null, oldHits = 0, failed; const firstFail = new Promise((r) => (failed = r));
+  await p.route("**/api/drafts/*/media", (r) => {
+    const u = r.request().url(); firstUrl ??= u;
+    if (u !== firstUrl) return r.continue();
+    oldHits++; failed(); return r.fulfill({ status: 503, body: "" });
+  });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.audio);
+  await firstFail; // the first attempt failed: the old upload is now in its 1 s backoff
+  await p.setInputFiles("#file", FX.video);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await p.waitForTimeout(3500); // longer than both backoffs (1 s + 2 s)
+  assert(oldHits === 1, `old file sent ${oldHits} times`);
+  assert((await p.getAttribute("#up", "data-state")) === "done" && (await p.locator("#vready").isVisible()), "replacement upload disturbed");
   await ctx.close();
 });
 await check("ui: panel lists messages with tags", async () => {

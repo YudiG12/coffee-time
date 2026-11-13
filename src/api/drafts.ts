@@ -53,12 +53,13 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
     if (!(await checkTurnstile(b.token, c.env.TURNSTILE_SECRET, ip, dev))) return c.json({ error: "turnstile" }, 403);
 
     const db = c.env.DB, hash = await ipHash(ip), now = Date.now();
-    const [, count] = await db.batch([
+    // Count and insert in one statement: SQLite runs it atomically, so concurrent requests can't all take the last slot.
+    const [, hit] = await db.batch([
       db.prepare("DELETE FROM draft_hits WHERE at < ?").bind(now - 60_000),
-      db.prepare("SELECT COUNT(*) AS n FROM draft_hits WHERE ip_hash = ? AND at >= ?").bind(hash, now - 60_000),
+      db.prepare("INSERT INTO draft_hits (ip_hash, at) SELECT ?1, ?2 WHERE (SELECT COUNT(*) FROM draft_hits WHERE ip_hash = ?1 AND at >= ?3) < ?4")
+        .bind(hash, now, now - 60_000, RATE_LIMIT),
     ]);
-    if (((count.results[0] as any)?.n ?? 0) >= RATE_LIMIT) return c.json({ error: "rate limit" }, 429);
-    await db.prepare("INSERT INTO draft_hits (ip_hash, at) VALUES (?, ?)").bind(hash, now).run();
+    if (!hit.meta.changes) return c.json({ error: "rate limit" }, 429);
 
     const s3 = s3Of(c.env);
     if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
