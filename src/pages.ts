@@ -29,6 +29,7 @@ const MASK = `<path d="M2 12a5 5 0 0 0 5 5 8 8 0 0 1 5 2 8 8 0 0 1 5-2 5 5 0 0 0
 const CAMERA = `<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>`;
 const PLUS = `<path d="M5 12h14"/><path d="M12 5v14"/>`;
 const X = `<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`;
+const CLOCK = `<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>`;
 const PARTY = `<path d="M5.8 11.3 2 22l10.7-3.79"/><path d="M4 3h.01"/><path d="M22 8h.01"/><path d="M15 2h.01"/><path d="M22 20h.01"/><path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10"/><path d="m22 13-.82-.33c-.86-.34-1.82.2-1.98 1.11c-.11.7-.72 1.22-1.43 1.22H17"/><path d="m11 2 .33.82c.34.86-.2 1.82-1.11 1.98C9.52 4.9 9 5.52 9 6.23V7"/><path d="M11 13c1.93 1.93 2.83 4.17 2 5-.83.83-3.07-.07-5-2-1.93-1.93-2.83-4.17-2-5 .83-.83 3.07.07 5 2Z"/>`;
 export const CONTACT = "contato@yudiganeko.com";
 
@@ -68,6 +69,8 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 .thumb{position:relative;width:150px;aspect-ratio:16/10;flex-shrink:0;border:1px solid var(--line2);border-radius:4px;background:linear-gradient(135deg,#5A3F28 0%,#3A2A1D 50%,#241B14 100%);display:flex;align-items:center;justify-content:center}
 .play{width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center}
 .vlog p{margin:0;color:var(--muted);font-size:14px;line-height:21px}
+.vlog .soon{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;padding:10px 12px;border:1px solid var(--line2);border-radius:4px;background:var(--surface);color:var(--ink2);font-size:14px;line-height:20px}.vlog .soon svg{flex-shrink:0;margin-top:2px;color:var(--accent)}
+.example{position:absolute;top:6px;left:6px;padding:2px 6px;border-radius:3px;background:rgba(23,18,14,.85);color:var(--ink2);font:600 10px/14px Oxanium,sans-serif;letter-spacing:.08em;text-transform:uppercase}
 .hero > div{min-width:0}
 .panel{border:1px solid var(--line2);border-radius:4px;background:var(--surface)}
 .rec,.ready,.vready,.rec-error{display:none}
@@ -161,7 +164,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  .btn.primary{padding:15px;font-size:17px}.btn.secondary{padding:12px;font-size:15px}
  .rec{padding:28px 20px 32px}.timer{font-size:48px;margin-top:16px}.stop-label{font-size:14px}.stop-label .m{display:none}.stop-label .d{display:inline}
  .ready{padding:16px 18px}.play-btn{width:48px;height:48px}.ready .time{font-size:20px}.ready .status{font-size:13px}.bar{margin-top:14px}
- .vlog{margin-top:0}.thumb{width:clamp(180px,16.7vw,240px)}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}
+ .vlog{margin-top:0}.thumb{width:clamp(180px,16.7vw,240px)}.play{width:44px;height:44px}.vlog .row{gap:18px}.vlog p{font-size:16px;line-height:24px;max-width:240px}.vlog .soon{font-size:15px;line-height:22px;max-width:480px}
 }
 </style>
 <main class="start" data-state="idle">
@@ -237,8 +240,9 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 </section>${siteKey ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>` : ""}
 <section class="vlog">
  <div class="eyebrow">Como fica no vlog</div>
+ <p class="soon" id="vlog-soon">${icon(CLOCK, 16)}<span>O primeiro episódio ainda está sendo gravado. Em breve aparece aqui.</span></p>
  <div class="row">
-  <div class="thumb" role="img" aria-label="Prévia do vlog"><span class="play">${PLAY}</span></div>
+  <div class="thumb" role="img" aria-label="Exemplo de como fica no vlog"><span class="example" id="vlog-example">Exemplo</span><span class="play">${PLAY}</span></div>
   <p>Eu ouço a mensagem no café e respondo ali mesmo.</p>
  </div>
 </section>
