@@ -22,6 +22,14 @@ const check = async (name, fn) => {
 };
 const assert = (c, msg) => { if (!c) throw new Error(msg); };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// The checks block the event loop on `wrangler r2` CLI calls (execSync); meanwhile the dev server may close an idle
+// keep-alive socket, and the next fetch reuses it ("other side closed"). Such a request never reached the Worker, so
+// it is sent once more on a fresh socket. Every other error (and every HTTP status) is passed through unchanged.
+const nodeFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  try { return await nodeFetch(url, init); }
+  catch (e) { if (e?.cause?.code !== "UND_ERR_SOCKET") throw e; return nodeFetch(url, init); }
+};
 
 rmSync(".verify", { recursive: true, force: true }); rmSync(OUT, { recursive: true, force: true }); mkdirSync(OUT, { recursive: true });
 console.log("build public/media.js (browser-side media work)…");
@@ -296,6 +304,18 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     assert(out.join() === "ack" && /status != 'uploading'/.test(updates[0]), `dead-letter update: ${updates[0]}`);
   });
 }
+// The browser PUTs straight to signed R2 URLs in production (local dev goes through the Worker, so CORS is never hit here):
+// the bucket's CORS rule lives in r2-cors.json and deploy.yml applies it on every deploy.
+await check("api: R2 CORS rule (r2-cors.json) allows PUT/POST/GET/HEAD and any header, exposes ETag, and deploy.yml applies it", async () => {
+  const rules = JSON.parse(readFileSync("r2-cors.json", "utf8")).rules;
+  assert(Array.isArray(rules) && rules.length > 0, "no rules");
+  const ok = rules.some((r) => ["PUT", "POST", "GET", "HEAD"].every((x) => r.allowed?.methods?.includes(x)) && r.allowed?.origins?.length > 0
+    && r.allowed?.headers?.includes("*") && r.exposeHeaders?.includes("ETag"));
+  assert(ok, `rule: ${JSON.stringify(rules)}`);
+  const deploy = readFileSync(".github/workflows/deploy.yml", "utf8"), bucket = prod.r2_buckets?.[0]?.bucket_name;
+  assert(new RegExp(`wrangler r2 bucket cors set ${bucket} --file r2-cors\\.json --force`).test(deploy), `deploy.yml does not apply the rule to ${bucket}`);
+  assert(deploy.indexOf("r2 bucket cors set") < deploy.indexOf("npm run deploy"), "CORS must be set before the Worker deploys");
+});
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
   const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts"; export * from "./src/api/sniff.ts";' }).toString();
