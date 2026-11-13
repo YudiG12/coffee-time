@@ -75,12 +75,16 @@ jobs:
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           owner="${GITHUB_REPOSITORY%%/*}"
           if grep -qiE 'CREDENTIAL FAILURE|authentication error|\[code: (6111|9106|9109|10000|10001)\]|invalid api token|token.*expired|\b(401|403)\b' run.log 2>/dev/null; then
-            labels=(--label deploy-failed --label needs-owner); who="@$owner: this needs you — Cloudflare rejected the credentials (expired/revoked token or missing permission). Renew \`CLOUDFLARE_API_TOKEN\` (\`cf-token-for-repo\`) and re-run the deploy."
+            cred=1; labels=(--label deploy-failed --label needs-owner); who="@$owner: this needs you — Cloudflare rejected the credentials (expired/revoked token or missing permission). Renew \`CLOUDFLARE_API_TOKEN\` (\`cf-token-for-repo\`) and re-run the deploy."
           else
-            labels=(--label agent --label deploy-failed); who="Builder: read the failed step (\`gh run view --log-failed\`), fix the cause in the repo and make the deploy green."
+            cred=; labels=(--label agent --label deploy-failed); who="Builder: read the failed step (\`gh run view --log-failed\`), fix the cause in the repo and make the deploy green."
           fi
           open=$(gh issue list --label deploy-failed --state open --json number -q '.[0].number')
-          if [ -n "$open" ]; then gh issue comment "$open" --body "Deploy failed again at ${GITHUB_SHA::7}: $run"; exit 0; fi
+          if [ -n "$open" ]; then
+            # an issue is already open: still escalate to the owner if this failure is about credentials
+            if [ -n "$cred" ]; then gh issue edit "$open" --add-label needs-owner; fi
+            gh issue comment "$open" --body "Deploy failed again at ${GITHUB_SHA::7}: $run"$'\n\n'"$who"; exit 0
+          fi
           gh issue create "${labels[@]}" --title "Fix the failing production deploy" --body "$(printf '%s\n' \
             '## What' "The deploy of \`main\` at ${GITHUB_SHA::7} failed: $run" "$who" \
             'Production was rolled back to the previous version if the new one was already live. Auto-merge is blocked for every other PR until a deploy of `main` succeeds.' \
