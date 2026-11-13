@@ -98,7 +98,7 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     // `track: true`: the browser uploaded the audio track of the video (ADR 0003) and it must be there too.
     const req: SendRequest = { name, anonymous, track: draft.kind === "video" && b.track === true, photos: photos as number[] };
     // Saved before anything can fail, so the sweep can finish this send if the browser never hears back.
-    await db.prepare("UPDATE submissions SET send_request = ?, send_at = datetime('now') WHERE id = ? AND status = 'uploading'").bind(JSON.stringify(req), id).run();
+    await db.prepare("UPDATE submissions SET send_request = ?, send_at = datetime('now'), sweep_at = NULL WHERE id = ? AND status = 'uploading'").bind(JSON.stringify(req), id).run();
     const r = await finishSend(c.env, draft, req);
     return c.json(r.body, r.status);
   });

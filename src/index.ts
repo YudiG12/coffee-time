@@ -24,6 +24,7 @@ export type Env = {
   AI: Ai;                      // Workers AI: Whisper + tags (ADR 0004)
   JOBS: Queue<Job>;            // coffee-time-jobs: one transcript job per submission
   JOBS_RETRY_BASE_S?: string;  // retry backoff base in seconds (default 30; verify sets 0)
+  SWEEP_BATCH?: string;        // sends the hourly sweep finishes per run (default 25; verify sets 1)
 };
 
 const app = new Hono<{ Bindings: Env }>();

@@ -58,7 +58,7 @@ const up = async (base) => { for (let i = 0; i < 60; i++) { try { if ((await fet
 
 // Cloudflare's Turnstile test keys (always pass); the Worker answers them offline in local dev.
 const TS_SITE = "1x00000000000000000000AA", TS_PASS = "1x0000000000000000000000000000000AA";
-const stop = serve(PORT, ["DEV_OPEN:1", `TURNSTILE_SITE_KEY:${TS_SITE}`, `TURNSTILE_SECRET:${TS_PASS}`]);
+const stop = serve(PORT, ["DEV_OPEN:1", "SWEEP_BATCH:1", `TURNSTILE_SITE_KEY:${TS_SITE}`, `TURNSTILE_SECRET:${TS_PASS}`]);
 await up(BASE);
 
 const api = async (path, init) => { const r = await fetch(BASE + path, { ...init, headers: { "content-type": "application/json", ...(init?.headers || {}) } }); return { status: r.status, body: await r.json().catch(() => null) }; };
@@ -476,7 +476,7 @@ const age = (id, created, sendAt = null) => d1sql(`UPDATE submissions SET create
 const rowOf = async (id) => { const r = await mcp("get_submission", { id }); return r.body.result.isError ? null : JSON.parse(r.body.result.content[0].text); };
 const runSweep = async () => { const r = await fetch(BASE + "/__scheduled?cron=0+*+*+*+*"); assert(r.ok, `/__scheduled → ${r.status}`); await wait(1500); };
 let sweptId = null;
-await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes drafts after 24 h and failed sends after 7 days", async () => {
+await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes drafts after 24 h and failed sends after 7 days; stuck sends go to the back of the line", async () => {
   const JUNK = Buffer.from("this is not audio at all, just text ".repeat(20));
   const make = async (buf = wav(1)) => { const d = await newDraft("audio", buf, "audio/wav"); return d; };
   const upload = async (d, buf = wav(1)) => assert((await putFile(d.upload.url, buf, "audio/wav")) === 200, "upload failed");
@@ -496,6 +496,13 @@ await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes
   const oldJunk = await make(JUNK); await upload(oldJunk, JUNK); assert((await post(`/api/drafts/${oldJunk.id}/send`, { consent: true })).status === 422, "junk not rejected"); age(oldJunk.id, "-8 days", "-8 days");
   const before = (await api("/api/panel/submissions")).body.filter((x) => x.id.startsWith("demo-")).map((x) => `${x.id}:${x.status}`).join();
 
+  // One send per run (SWEEP_BATCH=1): the oldest send, whose files are missing, is tried first and then goes to the
+  // back of the line, so the valid ones behind it are finished on the next runs instead of waiting for it forever.
+  await runSweep();
+  const first = Object.fromEntries(await Promise.all(Object.entries({ ok, junk, missing }).map(async ([k, d]) => [k, await rowOf(d.id)])));
+  assert(first.missing?.status === "uploading" && first.missing.sweep_at && first.junk?.status === "uploading" && first.ok?.status === "uploading",
+    `run 1: ${Object.entries(first).map(([k, r]) => `${k}=${r?.status}/${r?.sweep_at}`).join(" ")}`);
+  await runSweep(); assert((await rowOf(junk.id))?.status === "rejected", "run 2 did not move on to the next send (starved by a stuck one)");
   await runSweep();
   const s = Object.fromEntries(await Promise.all(Object.entries({ fresh, stale, ok, recent, junk, missing, expired, oldJunk }).map(async ([k, d]) => [k, await rowOf(d.id)])));
   assert(s.fresh?.status === "uploading" && r2has(`incoming/${fresh.id}/media`), `fresh draft: ${s.fresh?.status}`);
