@@ -27,6 +27,7 @@ Never weaken an `auth:` check. A change that needs one changed stops and opens a
 | Feature | Files | Check in verify |
 |---|---|---|
 | Start page (pt-BR): hero, Audio/Video tabs, buttons, "Como fica no vlog" | `src/pages.ts` `startPage`, `public/` | `ui: start page …`, `ui: start page layout, tabs and icons …` |
+| Audio recording (MediaRecorder, Opus): recording state, 90 s auto-stop, "Gravação pronta", play, Regravar | `src/pages.ts` `startPage`, `?max=` dev flag in `src/index.ts` `/` | `ui: record audio with a fake microphone …`, `ui: recording stops by itself at the limit …` |
 | Panel list and filters | `src/index.ts` `/painel`, `/api/panel/submissions` | `api: panel …`, `ui: panel …` |
 | MCP tools | `src/index.ts` `/mcp` | `mcp: …` |
 | Auth (Access JWT, Bearer, dev) | `src/auth.ts`, `guard` in `src/index.ts` | `auth: …` |

@@ -69,7 +69,8 @@ await check("mcp: set_status updates and rejects bad values", async () => {
 
 // ---- Screens ----
 const { chromium } = await import("playwright");
-const browser = await chromium.launch();
+// Fake microphone/camera with auto-accepted permission prompts, so recording can be tested headless.
+const browser = await chromium.launch({ args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] });
 // Offline-safe: external requests (Google Fonts) get an empty reply, so sandboxes without internet behave the same
 const offline = (ctx) => ctx.route((url) => !url.href.startsWith(BASE), (r) => r.fulfill({ status: 200, body: "" }));
 const errors = [];
@@ -133,16 +134,99 @@ await check("ui: start page layout, tabs and icons (mobile + desktop)", async ()
     await ctx.close();
   }
 });
+// Audio recording as in docs/design/*-1b-recording.png and *-1-audio-ready.png, with Chromium's fake microphone.
+await check("ui: record audio with a fake microphone, stop, ready, re-record (mobile + desktop)", async () => {
+  for (const [vp, name, stopLabel] of [[{ width: 390, height: 844 }, "mobile", "Toque para parar"], [{ width: 1440, height: 900 }, "desktop", "Clique para parar"]]) {
+    const ctx = await browser.newContext({ viewport: vp, permissions: ["microphone"] }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    await p.click("#record");
+    await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+    const t = await p.locator("body").innerText();
+    for (const s of ["máximo de 90 segundos", stopLabel]) assert(t.includes(s), `${name}: missing "${s}"`);
+    assert(!/\p{Extended_Pictographic}/u.test(t), `${name}: emoji in the recording state`);
+    assert(!(await p.locator("#record").isVisible()) && !(await p.locator(".vlog").isVisible()), `${name}: start buttons or vlog still visible while recording`);
+    assert(await p.locator("#tab-video").isDisabled(), `${name}: tabs not locked while recording`);
+    await p.waitForTimeout(3000);
+    const timer = (await p.locator("#timer").innerText()).trim();
+    assert(/^0:0[2-4]$/.test(timer), `${name}: timer shows ${timer} after ~3 s`);
+    await p.screenshot({ path: `${OUT}/record-${name}.png`, fullPage: true });
+    await p.click("#stop");
+    await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+    const ready = await p.locator("#ready").innerText();
+    assert(ready.includes("Gravação pronta") && ready.includes("Regravar") && ready.includes("/ 1:30"), `${name}: ready state text: ${ready.replace(/\s+/g, " ")}`);
+    const d = await p.evaluate(() => ({ ...document.getElementById("ready").dataset }));
+    assert(Number(d.duration) > 2.5 && Number(d.duration) < 5, `${name}: duration ${d.duration}`);
+    assert(Number(d.bytes) > 1000 && /opus|webm|ogg|mp4/.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
+    assert((await p.locator("#ready-time").innerText()).trim() === "0:03", `${name}: ready time ${await p.locator("#ready-time").innerText()}`);
+    await p.screenshot({ path: `${OUT}/ready-${name}.png`, fullPage: true });
+    await p.click("#tab-audio");
+    assert(await p.locator("#ready[data-duration]").isVisible(), `${name}: clicking the selected Áudio tab discarded the recording`);
+    await p.click("#play"); await p.waitForTimeout(600);
+    assert(await p.evaluate(() => { const a = document.getElementById("player"); return !a.paused && a.currentTime > 0; }), `${name}: playback did not start`);
+    await p.click("#play");
+    await p.click("#redo");
+    await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+    await p.waitForTimeout(1200); await p.click("#stop");
+    await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+    assert(Number(await p.getAttribute("#ready", "data-duration")) < 2.5, `${name}: re-record kept the old take`);
+    await ctx.close();
+  }
+});
+await check("ui: recording stops by itself at the limit (dev-only ?max=3)", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["microphone"] }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/?max=500", { waitUntil: "networkidle" });
+  assert((await p.content()).includes("máximo de 90 segundos"), "?max outside 1–89 must keep 90 s");
+  await p.goto(BASE + "/?max=3", { waitUntil: "networkidle" });
+  assert((await p.content()).includes("máximo de 3 segundos"), "dev ?max=3 not applied");
+  await p.click("#record");
+  await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+  await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 7000 }); // no click on stop
+  const d = Number(await p.getAttribute("#ready", "data-duration"));
+  assert(Math.abs(d - 3) < 0.3, `auto-stop duration ${d}`);
+  assert((await p.locator("#ready-bar").evaluate((e) => e.style.width)) === "100%", "bar not full at the limit");
+  await ctx.close();
+});
+// Double click while the microphone prompt is open must start one recorder only, and Stop must release the mic.
+await check("ui: double click on record starts one recording, tabs lock, stop releases the microphone, mic loss keeps the length", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["microphone"] }); await offline(ctx);
+  await ctx.addInitScript(() => {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.__calls = 0; window.__streams = [];
+    navigator.mediaDevices.getUserMedia = async (c) => { window.__calls++; await new Promise((r) => setTimeout(r, 800)); const s = await gum(c); window.__streams.push(s); return s; };
+  });
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.evaluate(() => { const b = document.getElementById("record"); b.click(); b.click(); b.click(); });
+  assert(await p.locator("#tab-video").isDisabled(), "tabs not locked while the microphone prompt is open");
+  await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(1200); await p.click("#stop");
+  await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(300);
+  const r = await p.evaluate(() => ({ calls: window.__calls, live: window.__streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length }));
+  assert(r.calls === 1, `getUserMedia called ${r.calls} times`);
+  assert(r.live === 0, `${r.live} microphone track(s) still live after stop`);
+  // Microphone goes away mid-recording (device unplugged): the take must still get its real length.
+  await p.click("#redo"); await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(3000);
+  await p.evaluate(() => window.__streams.at(-1).getTracks().forEach((t) => t.stop()));
+  await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+  const d = Number(await p.getAttribute("#ready", "data-duration"));
+  assert(d > 2.5 && d < 4.5, `duration after the microphone ended: ${d}`);
+  await ctx.close();
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
 });
 await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
 await check("ui: record main flow", async () => {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } } });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ["microphone"], recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } } });
   await offline(ctx); const p = await ctx.newPage();
   await p.goto(BASE + "/", { waitUntil: "networkidle" }); await p.waitForTimeout(1000);
   await p.click("#tab-video"); await p.waitForTimeout(800); await p.click("#tab-audio"); await p.waitForTimeout(600);
+  await p.click("#record"); await p.waitForTimeout(2500); await p.click("#stop"); await p.waitForTimeout(1500);
   await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); await p.waitForTimeout(1500);
   const vid = await p.video().path(); await ctx.close();
   try { execSync(`ffmpeg -y -loglevel error -i ${vid} -vf "fps=8,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" ${OUT}/flow.gif`); }
