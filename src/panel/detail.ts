@@ -129,11 +129,14 @@ export const registerPanel = (app: Hono<{ Bindings: Env }>) => {
     if (!b || (b.status === undefined && b.tags === undefined)) return c.json({ error: "nothing to change" }, 400);
     if (b.status !== undefined && !STATUSES.includes(b.status)) return c.json({ error: "invalid status" }, 400);
     if (b.tags !== undefined && (!Array.isArray(b.tags) || b.tags.length > 50)) return c.json({ error: "invalid tags" }, 400);
-    const r = await getRow(c.env.DB, c.req.param("id"));
-    if (!r || r.status === "rejected") return c.json({ error: "not found" }, 404);
-    const status = b.status ?? r.status, tags = b.tags !== undefined ? cleanTagList(b.tags, MAX_OWNER_TAGS) : JSON.parse(r.tags || "[]");
-    await c.env.DB.prepare("UPDATE submissions SET status = ?, tags = ? WHERE id = ?").bind(status, JSON.stringify(tags), r.id).run();
-    return c.json({ id: r.id, status, tags });
+    // Write only the supplied columns in one statement, so a status save and a tag save that overlap can't undo each other.
+    const sets: string[] = [], args: unknown[] = [];
+    if (b.status !== undefined) { sets.push("status = ?"); args.push(b.status); }
+    if (b.tags !== undefined) { sets.push("tags = ?"); args.push(JSON.stringify(cleanTagList(b.tags, MAX_OWNER_TAGS))); }
+    const r = await c.env.DB.prepare(`UPDATE submissions SET ${sets.join(", ")} WHERE id = ? AND status NOT IN ('rejected', 'uploading') RETURNING id, status, tags`)
+      .bind(...args, c.req.param("id")).first<{ id: string; status: string; tags: string | null }>();
+    if (!r) return c.json({ error: "not found" }, 404);
+    return c.json({ id: r.id, status: r.status, tags: JSON.parse(r.tags || "[]") });
   });
 
   app.delete("/api/panel/submissions/:id", async (c) => {

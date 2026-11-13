@@ -409,6 +409,18 @@ await check("api: panel detail saves status and tags (cleaned), refuses bad valu
   assert(cross.status === 403 && (await panelRow(id)).status === "used", `other origin → ${cross.status}`);
   assert((await del(path, { origin: "https://evil.example" })).status === 403 && await panelRow(id), "delete from another origin");
 });
+await check("api: a status save and a tag save at the same time both stick", async () => {
+  const { id } = await sendFull("Caio Corrida"), path = `/api/panel/submissions/${id}`;
+  for (let i = 0; i < 5; i++) {
+    const status = i % 2 ? "used" : "favorite", tags = [`Rodada ${i}`];
+    const [a, b] = await Promise.all([post(path, { status }), post(path, { tags })]);
+    assert(a.status === 200 && b.status === 200, `saves → ${a.status} ${b.status}`);
+    assert(JSON.stringify(b.body.tags) === JSON.stringify(tags) && a.body.status === status, `responses → ${JSON.stringify(a.body)} ${JSON.stringify(b.body)}`);
+    const row = await panelRow(id);
+    assert(row.status === status && JSON.stringify(JSON.parse(row.tags)) === JSON.stringify(tags), `round ${i}: ${row.status} ${row.tags}`);
+  }
+  assert((await del(path)).status === 200, "cleanup failed"); // keep the panel list as the UI checks expect
+});
 await check("api: panel files are served from R2 with the type from the bytes and Range for the player", async () => {
   const { id, audio } = detailMsg;
   const m = await fetch(`${BASE}/painel/arquivo/${id}/media`);
