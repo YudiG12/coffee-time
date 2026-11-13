@@ -39,7 +39,8 @@ const head = pr.head.sha;
 const files = await all(`/pulls/${PR}/files`);
 // The two ways a PR could merge itself past the guards: change the workflows that judge it, or delete an auth check.
 // Everything else merges alone; these wait for the owner.
-const workflows = files.filter((f) => /^\.github\/workflows\//.test(f.filename)).map((f) => f.filename);
+// both paths: renaming a workflow out of .github/workflows/ disables it just like editing it
+const workflows = files.filter((f) => [f.filename, f.previous_filename].some((n) => /^\.github\/workflows\//.test(n || ""))).map((f) => f.previous_filename || f.filename);
 // Auth checks: any change inside the body of one of main's `auth:` checks (not only its declaration line) is held,
 // so a PR can't weaken an assertion and make the weaker version the trusted baseline. Ranges come from main's file;
 // a patch line touches a range when it removes or replaces an old line in it, or inserts between two of its lines.
