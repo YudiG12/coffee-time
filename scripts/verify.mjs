@@ -761,7 +761,9 @@ await check("ui: record video with a fake camera: live preview, stop, Vídeo pro
     const d = await p.evaluate(() => ({ ...document.getElementById("vready").dataset }));
     assert(d.source === "record" && Number(d.duration) > 2.5 && Number(d.duration) < 5, `${name}: video duration ${d.duration} (${d.source})`);
     assert(Number(d.bytes) > 1000 && /^video\//.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
-    assert((await p.locator("#vdur").innerText()).trim() === "0:03", `${name}: video length ${await p.locator("#vdur").innerText()}`);
+    // The label must match the recorded duration (a slow machine records ~3–4.9 s, so no exact "0:03")
+    const vdur = (await p.locator("#vdur").innerText()).trim(), sec = Number(d.duration);
+    assert([Math.floor(sec), Math.round(sec)].some((n) => vdur === `0:0${n}`), `${name}: video length ${vdur} for ${d.duration} s`);
     assert(!(await p.locator("#ready").isVisible()) && (await p.getAttribute("main", "data-media")) === "video", `${name}: not in the video ready state`);
     const live = await p.evaluate(() => window.__streams.flatMap((s) => s.getTracks()).filter((x) => x.readyState === "live").length);
     assert(live === 0, `${name}: ${live} camera/microphone track(s) still live after stop`);
