@@ -16,7 +16,12 @@ export type Env = {
 const app = new Hono<{ Bindings: Env }>();
 
 // Public
-app.get("/", (c) => c.html(startPage()));
+// Recording limit is 90 s. Local dev only (DEV_OPEN=1 on localhost) may shorten it with ?max=N so verify can test the auto-stop.
+app.get("/", (c) => {
+  const host = new URL(c.req.url).hostname, dev = c.env.DEV_OPEN === "1" && (host === "localhost" || host === "127.0.0.1");
+  const max = Number(c.req.query("max"));
+  return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90));
+});
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 // Owner and agent only.
