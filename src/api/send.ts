@@ -11,6 +11,9 @@ import { MAX_BYTES, MAX_PHOTOS, MAX_PHOTO_BYTES, MAX_TRACK_BYTES } from "./draft
 import { sniff } from "./sniff";
 
 export const MAX_NAME = 60;
+// The hourly sweep marks an expired draft `sweep_at = 'deleting'` before it deletes the files; Send never touches it.
+export const DELETING = "deleting";
+export const CLAIMED = `sweep_at IS NOT '${DELETING}'`;
 const HEAD_BYTES = 4096;
 
 export type Draft = { id: string; kind: "audio" | "video"; media_key: string };
@@ -59,7 +62,7 @@ export const finishSend = async (env: SendEnv, draft: Draft, req: SendRequest): 
   const bad = files.filter((f, i) => { const h = heads[i]!; return h.size < 1 || h.size > f.max || !sniff(f.kind, h.bytes); });
   if (bad.length) {
     await deleteIncoming(bucket, id);
-    await db.prepare("UPDATE submissions SET status = 'rejected', send_request = NULL WHERE id = ? AND status = 'uploading'").bind(id).run();
+    await db.prepare(`UPDATE submissions SET status = 'rejected', send_request = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`).bind(id).run();
     return { status: 422, body: { error: "invalid file", files: bad.map((f) => f.from.split("/").pop()) } };
   }
 
@@ -70,9 +73,15 @@ export const finishSend = async (env: SendEnv, draft: Draft, req: SendRequest): 
   try { await env.JOBS.send({ id }); }
   catch (e) { console.log(`enqueue ${id} failed: ${(e as Error)?.message || e}`); return { status: 503, body: { error: "queue" } }; }
   const photoKeys = files.filter((f) => f.kind === "photo").map((f) => f.to);
-  const r = await db.prepare("UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ?, send_request = NULL WHERE id = ? AND status = 'uploading'")
+  const r = await db.prepare(`UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ?, send_request = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`)
     .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, JSON.stringify(photoKeys), id).run();
-  if (!r.meta.changes) return { status: 404, body: { error: "not found" } };
+  if (!r.meta.changes) {
+    // Lost the draft meanwhile (sent by another request, or claimed by the sweep): drop the copies made above, unless
+    // the other request committed them as a message. The queued job finds no message and is acked.
+    const now = await db.prepare("SELECT status FROM submissions WHERE id = ?").bind(id).first<{ status: string }>().catch(() => null);
+    if (!now || now.status === "uploading" || now.status === "rejected") await bucket.delete(files.map((f) => f.to)).catch(() => {});
+    return { status: 404, body: { error: "not found" } };
+  }
   // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
   // incoming/, never a broken message.
   await deleteIncoming(bucket, id).catch(() => {});
@@ -90,7 +99,7 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     if (b.name != null && typeof b.name !== "string") return c.json({ error: "invalid name" }, 400);
 
     const db = c.env.DB, id = c.req.param("id");
-    const draft = await db.prepare("SELECT id, kind, media_key FROM submissions WHERE id = ? AND status = 'uploading'").bind(id).first<Draft>();
+    const draft = await db.prepare(`SELECT id, kind, media_key FROM submissions WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`).bind(id).first<Draft>();
     if (!draft) return c.json({ error: "not found" }, 404);
     // Anonymous is audio only, and hides the name: an anonymous message never stores one.
     const anonymous = draft.kind === "audio" && b.anonymous === true;
@@ -98,7 +107,7 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     // `track: true`: the browser uploaded the audio track of the video (ADR 0003) and it must be there too.
     const req: SendRequest = { name, anonymous, track: draft.kind === "video" && b.track === true, photos: photos as number[] };
     // Saved before anything can fail, so the sweep can finish this send if the browser never hears back.
-    await db.prepare("UPDATE submissions SET send_request = ?, send_at = datetime('now'), sweep_at = NULL WHERE id = ? AND status = 'uploading'").bind(JSON.stringify(req), id).run();
+    await db.prepare(`UPDATE submissions SET send_request = ?, send_at = datetime('now'), sweep_at = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`).bind(JSON.stringify(req), id).run();
     const r = await finishSend(c.env, draft, req);
     return c.json(r.body, r.status);
   });

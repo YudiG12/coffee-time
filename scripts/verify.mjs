@@ -318,7 +318,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits)", async () => {
+  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits); a commit lost to the sweep removes its copies", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -334,7 +334,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     };
     const DB = { prepare: (sql) => ({ bind: (...a) => ({
       first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
-      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading") { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
+      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading" && !row.claimed) { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
     }) }) };
     const jobs = [], JOBS = { send: async (m) => { jobs.push(m); } };
     const app = new sm.Hono(); sm.registerSend(app);
@@ -354,6 +354,13 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     JOBS.send = realSend; const back = await send();
     assert(back.status === 200 && row.status === "new" && jobs.length === 2, `retry after the queue is back → ${back.status}, status ${row.status}, jobs ${jobs.length}`);
     assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
+    // The hourly sweep claims the draft while Send is copying: the commit is refused and the copies are removed, so
+    // the sweep's delete can't leave a message without files, and no file is left behind in media/.
+    Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" }); for (const k of ["media", "photo-1", "photo-2"]) { store.set(`incoming/d1/${k}`, store.get(`media/d1/${k}`)); store.delete(`media/d1/${k}`); }
+    JOBS.send = async (m) => { jobs.push(m); row.claimed = true; };
+    const lost = await send(); JOBS.send = realSend; delete row.claimed;
+    assert(lost.status === 404 && row.status === "uploading", `send that lost to the sweep → ${lost.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => !store.has(`media/d1/${k}`)), `copies left in media/: ${[...store.keys()].join(",")}`);
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
     assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
@@ -476,7 +483,7 @@ const age = (id, created, sendAt = null) => d1sql(`UPDATE submissions SET create
 const rowOf = async (id) => { const r = await mcp("get_submission", { id }); return r.body.result.isError ? null : JSON.parse(r.body.result.content[0].text); };
 const runSweep = async () => { const r = await fetch(BASE + "/__scheduled?cron=0+*+*+*+*"); assert(r.ok, `/__scheduled → ${r.status}`); await wait(1500); };
 let sweptId = null;
-await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes drafts after 24 h and failed sends after 7 days; stuck sends go to the back of the line", async () => {
+await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes drafts after 24 h and failed sends after 7 days; stuck sends go to the back of the line; a claimed draft can't be sent", async () => {
   const JUNK = Buffer.from("this is not audio at all, just text ".repeat(20));
   const make = async (buf = wav(1)) => { const d = await newDraft("audio", buf, "audio/wav"); return d; };
   const upload = async (d, buf = wav(1)) => assert((await putFile(d.upload.url, buf, "audio/wav")) === 200, "upload failed");
@@ -521,6 +528,11 @@ await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes
   await runSweep();
   assert((await rowOf(ok.id))?.status === "new" && (await rowOf(fresh.id))?.status === "uploading" && (await rowOf(missing.id))?.status === "uploading", "second sweep changed something");
   assert((await api("/api/panel/submissions")).body.filter((x) => x.id.startsWith("demo-")).map((x) => `${x.id}:${x.status}`).join() === before, "demo messages changed");
+  // A draft the sweep has claimed for deletion (sweep_at = 'deleting') can't be sent any more: 404, nothing copied.
+  const claimed = await make(); await upload(claimed); d1sql(`UPDATE submissions SET sweep_at = 'deleting' WHERE id = '${claimed.id}'`);
+  const late = await post(`/api/drafts/${claimed.id}/send`, { consent: true, name: "Tarde" });
+  const cRow = await rowOf(claimed.id);
+  assert(late.status === 404 && cRow?.status === "uploading" && cRow.send_request === null && !r2has(`media/${claimed.id}/media`), `send of a claimed draft → ${late.status} ${cRow?.status}`);
   sweptId = ok.id;
 });
 

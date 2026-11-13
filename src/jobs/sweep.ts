@@ -6,7 +6,7 @@
 // 2. Deletes drafts nobody sent after 24 h, and failed sends (rejected, or never finished) after 7 days: R2 objects
 //    under incoming/<id>/ and media/<id>/ first, then the row, so a storage error only delays it to the next run.
 import type { Env } from "../index";
-import { finishSend, type Draft, type SendRequest } from "../api/send";
+import { CLAIMED, DELETING, finishSend, type Draft, type SendRequest } from "../api/send";
 
 export const SEND_GRACE = "-10 minutes"; // leave a Send the browser is still running alone
 export const BATCH = 25;                 // sends finished per run, to stay well inside a Worker invocation's limits
@@ -14,11 +14,21 @@ export const DELETE_BATCH = 100;         // rows deleted per run
 
 export type SweepResult = { finished: Record<string, string[]>; deleted: string[] };
 
+// Expired: a draft nobody sent after 24 h, or a failed send (rejected, or never finished) after 7 days.
+const EXPIRED = `((status = 'uploading' AND send_request IS NULL AND created_at < datetime('now', '-24 hours'))
+  OR (status IN ('uploading','rejected') AND COALESCE(send_at, created_at) < datetime('now', '-7 days')))`;
+
+// Claim first, then files, then the row. The claim re-checks the expiry in the same statement, so a Send that got
+// there first (it saves `send_request` or commits `new`) wins and the row is skipped; once claimed, Send refuses the
+// draft (see CLAIMED in src/api/send.ts) and removes any copy it made, so no message can lose its files here.
 const deleteMessage = async (env: Env, id: string) => {
+  const claim = await env.DB.prepare(`UPDATE submissions SET sweep_at = '${DELETING}' WHERE id = ? AND ${EXPIRED}`).bind(id).run();
+  if (!claim.meta.changes) return false;
   const keys: string[] = [];
   for (const prefix of [`incoming/${id}/`, `media/${id}/`]) keys.push(...(await env.MEDIA.list({ prefix })).objects.map((o) => o.key));
   if (keys.length) await env.MEDIA.delete(keys);
-  await env.DB.prepare("DELETE FROM submissions WHERE id = ? AND status IN ('uploading','rejected')").bind(id).run();
+  await env.DB.prepare(`DELETE FROM submissions WHERE id = ? AND sweep_at = '${DELETING}'`).bind(id).run();
+  return true;
 };
 
 export const sweep = async (env: Env): Promise<SweepResult> => {
@@ -27,7 +37,7 @@ export const sweep = async (env: Env): Promise<SweepResult> => {
   await db.prepare("DELETE FROM draft_hits WHERE at < ?").bind(Date.now() - 60_000).run();
 
   const pending = await db.prepare(`SELECT id, kind, media_key, send_request FROM submissions
-    WHERE status = 'uploading' AND send_request IS NOT NULL AND send_at < datetime('now', ?) AND send_at >= datetime('now', '-7 days')
+    WHERE status = 'uploading' AND ${CLAIMED} AND send_request IS NOT NULL AND send_at < datetime('now', ?) AND send_at >= datetime('now', '-7 days')
     ORDER BY sweep_at IS NOT NULL, sweep_at, send_at LIMIT ?`).bind(SEND_GRACE, batch).all<Draft & { send_request: string }>();
   for (const row of pending.results) {
     let outcome: string;
@@ -37,16 +47,13 @@ export const sweep = async (env: Env): Promise<SweepResult> => {
     } catch (e) { outcome = "error"; console.log(`sweep: finish ${row.id} failed: ${(e as Error)?.message || e}`); }
     // Still `uploading` (409, 503, error): to the back of the line for the next run.
     if (outcome !== "200" && outcome !== "422")
-      await db.prepare("UPDATE submissions SET sweep_at = datetime('now') WHERE id = ? AND status = 'uploading'").bind(row.id).run().catch(() => {});
+      await db.prepare(`UPDATE submissions SET sweep_at = datetime('now') WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`).bind(row.id).run().catch(() => {});
     (out.finished[outcome] ??= []).push(row.id);
   }
 
-  const old = await db.prepare(`SELECT id FROM submissions WHERE
-      (status = 'uploading' AND send_request IS NULL AND created_at < datetime('now', '-24 hours'))
-      OR (status IN ('uploading','rejected') AND COALESCE(send_at, created_at) < datetime('now', '-7 days'))
-    ORDER BY created_at LIMIT ?`).bind(DELETE_BATCH).all<{ id: string }>();
+  const old = await db.prepare(`SELECT id FROM submissions WHERE ${EXPIRED} ORDER BY created_at LIMIT ?`).bind(DELETE_BATCH).all<{ id: string }>();
   for (const { id } of old.results) {
-    try { await deleteMessage(env, id); out.deleted.push(id); }
+    try { if (await deleteMessage(env, id)) out.deleted.push(id); }
     catch (e) { console.log(`sweep: delete ${id} failed: ${(e as Error)?.message || e}`); }
   }
   console.log(`sweep: ${JSON.stringify(out)}`);
