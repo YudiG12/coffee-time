@@ -10,12 +10,11 @@ import type { Hono } from "hono";
 import type { Env } from "../index";
 import { BUCKET, s3Of, URL_TTL } from "../api/drafts";
 import { presign } from "../api/s3";
-import { cleanTagList } from "../jobs/transcribe";
+import { cleanTagList, MAX_OWNER_TAGS } from "../jobs/transcribe";
 import { detailPage } from "../pages";
 import { zipStream, type ZipEntry } from "./zip";
 
 export const STATUSES = ["new", "favorite", "used"];
-export const MAX_OWNER_TAGS = 10;
 
 export type Row = {
   id: string; created_at: string; status: string; kind: "audio" | "video"; name: string | null; anonymous: number;

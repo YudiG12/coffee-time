@@ -420,6 +420,15 @@ await check("api: panel detail saves status and tags (cleaned), refuses bad valu
   assert(cross.status === 403 && (await panelRow(id)).status === "used", `other origin → ${cross.status}`);
   assert((await del(path, { origin: "https://evil.example" })).status === 403 && await panelRow(id), "delete from another origin");
 });
+await check("api: a tag the owner adds while \"Transcrevendo…\" survives when the transcript job finishes", async () => {
+  const id = await sendAudio(markedWav("SLOWJOB"), "Tag Cedo"); // the stub's Whisper takes 10 s here
+  const r = await post(`/api/panel/submissions/${id}`, { tags: ["Entrevista"] });
+  assert(r.status === 200 && (await panelRow(id)).transcript === null, `early tag → ${r.status}, transcript ${(await panelRow(id)).transcript}`);
+  const row = await until(async () => { const x = await panelRow(id); return x?.transcript != null && x; }, 40000);
+  assert(row, "never transcribed");
+  const tags = JSON.parse(row.tags);
+  assert(tags[0] === "Dúvida" && tags.includes("Rotina") && tags.includes("Entrevista"), `tags after the job: ${row.tags}`);
+});
 await check("api: panel files are served from R2 with the type from the bytes and Range for the player", async () => {
   const { id, audio } = detailMsg;
   const m = await fetch(`${BASE}/painel/arquivo/${id}/media`);
