@@ -8,6 +8,7 @@ export const JOBS_QUEUE = "coffee-time-jobs", DLQ = "coffee-time-jobs-dlq";
 export const WHISPER = "@cf/openai/whisper-large-v3-turbo", TAGGER = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // a 90 s message is ~1–2 MB; larger means a video with no audio track
 export const MAX_TAGS = 6, MAX_TAG = 30;
+export const MAX_OWNER_TAGS = 10; // tags on a message once the owner edits them in the panel
 export type Job = { id: string };
 
 const TAG_PROMPT = `Você organiza mensagens de inscritos de um canal de vlogs. Leia a transcrição e responda só em JSON:
@@ -24,11 +25,9 @@ const base64 = (bytes: Uint8Array) => {
   return btoa(s);
 };
 
-// Model output → clean tag list: type first, then topics; trimmed, ≤ 30 chars on a word boundary, no duplicates (case-insensitive).
-export const cleanTags = (out: unknown): string[] => {
-  let v: any = out;
-  if (typeof v === "string") { try { v = JSON.parse(v.slice(v.indexOf("{"), v.lastIndexOf("}") + 1)); } catch { v = null; } }
-  const raw = [v?.type, ...(Array.isArray(v?.topics) ? v.topics : [])];
+// A tag list → clean tags: trimmed, ≤ 30 chars on a word boundary, no duplicates (case-insensitive), at most `max`.
+// Also used for the tags the owner edits in the panel.
+export const cleanTagList = (raw: unknown[], max: number): string[] => {
   const seen = new Set<string>(), tags: string[] = [];
   for (const t of raw) {
     if (typeof t !== "string") continue;
@@ -36,9 +35,15 @@ export const cleanTags = (out: unknown): string[] => {
     if (tag.length > MAX_TAG) { const cut = tag.slice(0, MAX_TAG + 1); tag = (cut.includes(" ") ? cut.slice(0, cut.lastIndexOf(" ")) : cut.slice(0, MAX_TAG)).trim(); } // whole words
     if (!tag || seen.has(tag.toLowerCase())) continue;
     seen.add(tag.toLowerCase()); tags.push(tag);
-    if (tags.length === MAX_TAGS) break;
+    if (tags.length === max) break;
   }
   return tags;
+};
+// Model output → clean tag list: type first, then topics.
+export const cleanTags = (out: unknown): string[] => {
+  let v: any = out;
+  if (typeof v === "string") { try { v = JSON.parse(v.slice(v.indexOf("{"), v.lastIndexOf("}") + 1)); } catch { v = null; } }
+  return cleanTagList([v?.type, ...(Array.isArray(v?.topics) ? v.topics : [])], MAX_TAGS);
 };
 
 export const transcribe = async (env: Env, id: string) => {
@@ -64,8 +69,17 @@ export const transcribe = async (env: Env, id: string) => {
     } as any) as { response?: unknown };
     tags = cleanTags(t?.response);
   }
-  await env.DB.prepare("UPDATE submissions SET transcript = ?, tags = ?, transcript_error = NULL WHERE id = ? AND transcript IS NULL")
-    .bind(transcript, JSON.stringify(tags), id).run();
+  // The owner may have edited the tags in the panel while this ran: keep theirs after the model's (type first).
+  // Compare-and-set on the tags just read, so an edit landing in between makes this read again instead of being lost.
+  for (let i = 0; i < 5; i++) {
+    const now = await env.DB.prepare("SELECT tags FROM submissions WHERE id = ? AND transcript IS NULL").bind(id).first<{ tags: string }>();
+    if (!now) return; // already transcribed (a duplicate job) or deleted
+    const merged = cleanTagList([...tags, ...(JSON.parse(now.tags || "[]") as unknown[])], MAX_OWNER_TAGS);
+    const r = await env.DB.prepare("UPDATE submissions SET transcript = ?, tags = ?, transcript_error = NULL WHERE id = ? AND transcript IS NULL AND tags = ?")
+      .bind(transcript, JSON.stringify(merged), id, now.tags).run();
+    if (r.meta.changes) return;
+  }
+  throw new Error(`tags kept changing for ${id}`);
 };
 
 // Backoff: 30 s, 60 s, 120 s … capped at 15 min. JOBS_RETRY_BASE_S overrides the base (verify sets 0).

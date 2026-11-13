@@ -586,6 +586,15 @@ export const when = (createdAt: string, now = Date.now()) => {
   return `${Number(d.day)} ${MONTHS[Number(d.month) - 1]}`;
 };
 
+// Shared by the panel pages: top bar, page frame, type pill colors.
+const PANEL_CSS = `.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 48px;height:54px;border-bottom:1px solid var(--line)}
+.top .brand{display:flex;align-items:baseline;gap:14px;font-weight:800;font-size:17px;letter-spacing:-.02em;color:var(--ink);text-decoration:none}.top .brand .eyebrow{color:var(--accent)}
+.top .who{color:var(--muted);font-size:14px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel{max-width:1440px;margin:0 auto;padding:40px 48px 64px}
+@media (max-width:900px){.top{padding:0 16px}.panel{padding:28px 16px 48px}}`;
+const panelTop = (user: string) => `<header class="top"><a class="brand" href="/painel">Coffee Time <span class="eyebrow">Painel</span></a><div class="who">${user ? `${esc(user)} · Access` : "local"}</div></header>`;
+const who = (r: { anonymous: number; name: string | null }) => (r.anonymous ? "Anônimo" : r.name || "Sem nome");
+
 // Panel list: docs/design/panel-list.png. Status tabs with counts, tag chips, search in transcripts; filters are links.
 export const panelPage = (rows: Row[], o: PanelOpts) => {
   const href = (f: { status?: string; tag?: string; q?: string }) => {
@@ -604,10 +613,7 @@ export const panelPage = (rows: Row[], o: PanelOpts) => {
     return `<p>“${esc(r.transcript)}”</p>${tags.length ? `<div class="tags">${tags.map((t, i) => `<a class="pill${i === 0 ? ` type ${TYPE_TONE[t] || ""}` : ""}" href="${href({ tag: t })}">${esc(t)}</a>`).join("")}</div>` : ""}`;
   };
   return layout("Coffee Time · Painel", `<style>
-.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 48px;height:54px;border-bottom:1px solid var(--line)}
-.top .brand{display:flex;align-items:baseline;gap:14px;font-weight:800;font-size:17px;letter-spacing:-.02em}.top .brand .eyebrow{color:var(--accent)}
-.top .who{color:var(--muted);font-size:14px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel{max-width:1440px;margin:0 auto;padding:40px 48px 64px}
+${PANEL_CSS}
 .head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap}
 .head h1{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:0}.head .fresh{margin:6px 0 0;color:var(--ink2);font-size:15px}.head .fresh b{font-weight:700}
 .search{display:flex;align-items:center;gap:10px;width:360px;max-width:100%;padding:0 14px;height:40px;border:1px solid var(--line2);border-radius:4px;background:var(--surface);color:var(--subtle)}
@@ -627,7 +633,7 @@ export const panelPage = (rows: Row[], o: PanelOpts) => {
 .thumb{width:64px;height:64px;border-radius:4px;object-fit:cover;display:block;background:#2C221A}
 .thumb.icon{display:flex;align-items:center;justify-content:center;color:var(--accent);background:#3A2C1F;border:1px solid var(--line2)}
 .thumb.icon[data-kind=audio]{background:#221A14}
-.who b{display:block;font-size:15px;font-weight:700}.who small{color:var(--subtle);font-size:13px}.who .photos{color:#8FB2E0}
+.who b{display:block;font-size:15px;font-weight:700}.who .open{color:inherit;text-decoration:none}.who .open:hover{color:var(--accent)}.who small{color:var(--subtle);font-size:13px}.who .photos{color:#8FB2E0}
 .said p{margin:0;color:var(--ink2);font-size:15px;line-height:23px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .said .none{color:var(--subtle);font-style:normal;font-size:15px}
 .tags{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}.tags .pill{margin:0;text-decoration:none}
@@ -641,7 +647,7 @@ export const panelPage = (rows: Row[], o: PanelOpts) => {
  .grid>.c-t{grid-area:t}.grid>.c-w{grid-area:w}.grid>.c-x{grid-area:x}.grid>.c-s{grid-area:s}.grid>.c-u{grid-area:d}.grid>.c-d{display:none}
  #submissions li{margin:0;padding:16px 0}}
 </style>
-<header class="top"><div class="brand">Coffee Time <span class="eyebrow">Painel</span></div><div class="who">${o.user ? `${esc(o.user)} · Access` : "local"}</div></header>
+${panelTop(o.user)}
 <main class="panel">
 <div class="head"><div><h1>Envios</h1><p class="fresh" id="fresh"><b>${fresh}</b> ${fresh === 1 ? "envio novo" : "envios novos"}</p></div>
 <form class="search" action="/painel" role="search">${icon(SEARCH, 16)}<input type="search" name="q" value="${esc(o.filter.q)}" placeholder="Buscar nas transcrições" aria-label="Buscar nas transcrições">${o.filter.status ? `<input type="hidden" name="status" value="${esc(o.filter.status)}">` : ""}${o.filter.tag ? `<input type="hidden" name="tag" value="${esc(o.filter.tag)}">` : ""}</form></div>
@@ -649,14 +655,162 @@ export const panelPage = (rows: Row[], o: PanelOpts) => {
 ${o.tags.length ? `<div class="sep"></div><span class="eyebrow">Tags</span>${o.tags.map((t) => `<a class="chip" data-tag="${esc(t)}" href="${href({ tag: o.filter.tag === t ? "" : t })}"${o.filter.tag === t ? ' aria-current="true"' : ""}>${esc(t)}</a>`).join("")}` : ""}</nav>
 <div class="grid cols" aria-hidden="true"><span></span><span class="eyebrow">Quem</span><span class="eyebrow">O que falou</span><span class="eyebrow">Duração</span><span class="eyebrow">Quando</span><span class="eyebrow">Status</span></div>
 ${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" class="grid">
- <div class="c-t">${thumb(r)}</div>
- <div class="c-w who"><b>${esc(r.anonymous ? "Anônimo" : r.name || "Sem nome")}</b><small>${sub(r)}</small></div>
+ <div class="c-t"><a href="/painel/envio/${encodeURIComponent(r.id)}" tabindex="-1" aria-hidden="true">${thumb(r)}</a></div>
+ <div class="c-w who"><b><a class="open" href="/painel/envio/${encodeURIComponent(r.id)}">${esc(who(r))}</a></b><small>${sub(r)}</small></div>
  <div class="c-x said">${said(r)}</div>
  <div class="c-d dur">${r.duration_s != null ? fmt(r.duration_s) : "–"}</div>
  <div class="c-u date">${esc(when(r.created_at, o.now))}</div>
  <div class="c-s"><span class="status ${esc(r.status)}">${esc(STATUS[r.status] || r.status)}</span></div></li>`).join("")}</ul>`
     : `<ul id="submissions"></ul><p class="empty">Nenhum envio por aqui.</p>`}
 </main>`);
+};
+
+// Panel detail: docs/design/panel-detail.png. Player (audio with bars, or the video), transcript, photos; on the side
+// the status switch, editable tags, "Baixar arquivos (.zip)" and "Apagar envio" with an in-page confirmation.
+type Detail = { id: string; created_at: string; status: string; kind: string; name: string | null; anonymous: number; duration_s: number | null;
+  media_key: string | null; photo_keys: string; transcript: string | null; transcript_error: string | null; tags: string };
+const DOWNLOAD = `<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>`;
+const BACK = `<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>`;
+export const detailPage = (r: Detail | null, o: { user: string; now?: number }) => {
+  const css = `<style>${PANEL_CSS}
+.back{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-size:14px;font-weight:600;text-decoration:none}
+.title{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;margin:16px 0 26px}
+.title .thumb{width:52px;height:52px;border-radius:4px;object-fit:cover;display:flex;align-items:center;justify-content:center;background:#221A14;border:1px solid var(--line2);color:var(--accent)}
+.title h1{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:0;line-height:52px}
+.title .meta{color:var(--muted);font-size:15px;padding-bottom:6px}
+.detail{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:40px;align-items:start}
+.player{display:flex;align-items:center;gap:18px;padding:18px 20px;border:1px solid var(--line2);border-radius:4px;background:var(--surface)}
+.player .play{width:48px;height:48px;flex:none;border-radius:50%;border:0;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.bars{display:flex;align-items:center;gap:4px;height:36px;flex:1;min-width:0;overflow:hidden;cursor:pointer}
+.bars i{display:block;width:3px;flex:none;border-radius:2px;background:#4A3A2C}.bars i.on{background:var(--accent)}
+.player .time{font:500 14px "JetBrains Mono",ui-monospace,monospace;color:var(--ink2);white-space:nowrap}
+video.video{display:block;width:100%;max-height:520px;background:#000;border-radius:4px;border:1px solid var(--line2)}
+.label{display:block;margin:0 0 10px;font-size:11px}.label.accent{color:var(--accent)}
+.transcript{margin:28px 0 0}.transcript p{margin:0;max-width:700px;color:var(--ink2);font-size:17px;line-height:28px}.transcript .none{color:var(--subtle)}
+.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:28px}.photos a{display:block}.photos img{width:160px;height:160px;object-fit:cover;border-radius:4px;display:block;background:#221A14}
+aside .group{margin-bottom:22px}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px;border:1px solid var(--line2);border-radius:4px}
+.seg button{height:34px;border:0;border-radius:4px;background:none;color:var(--ink2);font:600 14px Onest,system-ui,sans-serif;cursor:pointer}
+.seg button[aria-pressed=true]{background:#4A3420;color:var(--accent)}
+.tags{display:flex;flex-wrap:wrap;gap:6px}
+.tag{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 4px 0 9px;border-radius:4px;font-size:13px;font-weight:600;background:#2C221A;border:1px solid var(--line2);color:var(--ink2)}
+.tag.type{background:#4A3420;border-color:#4A3420;color:var(--accent)}
+.tag button{display:flex;border:0;background:none;color:inherit;opacity:.6;padding:2px;cursor:pointer}.tag button:hover{opacity:1}
+.add{height:26px;padding:0 9px;border:1px dashed var(--line2);border-radius:4px;background:none;color:var(--muted);font:600 13px Onest,system-ui,sans-serif;cursor:pointer}
+.add-input{height:26px;width:140px;padding:0 8px;border:1px solid var(--accent);border-radius:4px;background:var(--surface);color:var(--ink);font:600 13px Onest,system-ui,sans-serif;outline:0}
+a.btn{text-decoration:none;padding:12px}
+.danger{display:block;margin:16px auto 0;border:0;background:none;color:var(--rec);font:600 14px Onest,system-ui,sans-serif;cursor:pointer}
+.confirm{margin-top:14px;padding:14px;border:1px solid #5A2E26;border-radius:4px;background:#2A1A15}
+.confirm p{margin:0 0 12px;color:var(--ink2);font-size:14px;line-height:21px}
+.confirm .row{display:flex;gap:8px}.confirm .btn{padding:10px;font-size:14px}.confirm .btn.del{background:var(--rec);color:var(--on-accent)}
+.msg{min-height:20px;margin-top:10px;color:var(--rec);font-size:13px}
+.notfound{color:var(--muted);margin:28px 0}
+@media (max-width:900px){.detail{grid-template-columns:minmax(0,1fr);gap:28px}.title h1{font-size:28px;line-height:40px}.photos img{width:calc(50vw - 21px);height:calc(50vw - 21px);max-width:160px;max-height:160px}}
+</style>`;
+  if (!r) return layout("Coffee Time · Painel", `${css}${panelTop(o.user)}<main class="panel"><a class="back" href="/painel">${icon(BACK, 16)}Voltar para envios</a><p class="notfound">Envio não encontrado.</p></main>`);
+  const id = encodeURIComponent(r.id), file = (f: string) => `/painel/arquivo/${id}/${f}`;
+  const photos = (JSON.parse(r.photo_keys || "[]") as string[]).map((k) => k.split("/").pop()!);
+  const tags = JSON.parse(r.tags || "[]") as string[];
+  const rejected = r.status === "rejected", dur = r.duration_s != null ? fmt(r.duration_s) : "";
+  const meta = [when(r.created_at, o.now), `${r.kind === "video" ? "vídeo" : "áudio"}${dur ? ` ${dur}` : ""}`, r.anonymous ? "voz distorcida" : "",
+    photos.length ? `${photos.length} ${photos.length === 1 ? "foto" : "fotos"}` : ""].filter(Boolean).join(" · ");
+  // Decorative bars, the same for a message every time (seeded by its id).
+  let seed = [...r.id].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
+  const bars = Array.from({ length: 48 }, () => { seed = (seed * 1103515245 + 12345) >>> 0; return 8 + (seed >>> 16) % 28; });
+  const player = rejected || !r.media_key ? ""
+    : r.kind === "video" ? `<video class="video" id="video" controls preload="metadata" playsinline src="${file("media")}"></video>`
+    : `<div class="player" id="player"><button class="play" id="play" type="button" aria-label="Ouvir">${PLAY}</button>
+<div class="bars" id="bars" aria-hidden="true">${bars.map((h) => `<i style="height:${h}px"></i>`).join("")}</div>
+<span class="time" id="time">0:00 / ${dur || "0:00"}</span><audio id="audio" preload="metadata" src="${file("media")}"></audio></div>`;
+  const said = r.transcript ? `<p id="transcript">${esc(r.transcript)}</p>`
+    : `<p id="transcript" class="none">${r.transcript_error || rejected ? "Sem transcrição" : "Transcrevendo…"}</p>`;
+  return layout(`${who(r)} · Coffee Time`, `${css}${panelTop(o.user)}
+<main class="panel" data-id="${esc(r.id)}">
+<a class="back" href="/painel">${icon(BACK, 16)}Voltar para envios</a>
+<div class="title">${photos.length ? `<img class="thumb" src="${file(photos[0])}" alt="">` : `<div class="thumb">${icon(r.kind === "video" ? VIDEO : MIC, 22)}</div>`}
+<h1>${esc(who(r))}</h1><span class="meta" id="meta">${esc(meta)}</span></div>
+<div class="detail">
+<section>${player}
+<div class="transcript"><span class="eyebrow label accent">Transcrição</span>${said}</div>
+${photos.length ? `<div class="photos" id="photos">${photos.map((p, i) => `<a href="${file(p)}" target="_blank" rel="noopener"><img src="${file(p)}" alt="Foto ${i + 1}" loading="lazy"></a>`).join("")}</div>` : ""}
+</section>
+<aside>
+${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p class="notfound" style="margin:0">Rejeitado: o arquivo não passou na checagem.</p></div>`
+  : `<div class="group"><span class="eyebrow label" id="status-label">Status</span><div class="seg" id="status" role="group" aria-labelledby="status-label">${[["new", "Novo"], ["favorite", "Favorito"], ["used", "Usado"]].map(([k, l]) => `<button type="button" data-status="${k}" aria-pressed="${r.status === k}">${l}</button>`).join("")}</div></div>
+<div class="group"><span class="eyebrow label">Tags</span><div class="tags" id="tags"></div></div>`}
+<a class="btn primary" id="zip" href="/painel/envio/${id}/arquivos.zip" download>${icon(DOWNLOAD, 18)}Baixar arquivos (.zip)</a>
+<button class="danger" id="delete" type="button">Apagar envio</button>
+<div class="confirm" id="confirm" hidden role="alertdialog" aria-labelledby="confirm-text"><p id="confirm-text">Apagar este envio? Os arquivos e a transcrição somem para sempre.</p>
+<div class="row"><button class="btn del" id="confirm-delete" type="button">Apagar</button><button class="btn secondary" id="cancel-delete" type="button">Cancelar</button></div></div>
+<p class="msg" id="msg" role="status"></p>
+</aside></div></main>
+<script>
+(() => {
+ const $ = (x) => document.getElementById(x), api = "/api/panel/submissions/${id}", X = ${JSON.stringify(icon(X, 12))};
+ let tags = ${JSON.stringify(tags).replace(/</g, "\\u003c")};
+ const fail = () => { $("msg").textContent = "Não deu para salvar. Tente de novo."; };
+ const save = async (body) => {
+  $("msg").textContent = "";
+  const r = await fetch(api, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+  if (!r || !r.ok) { fail(); return null; }
+  return r.json();
+ };
+ // Status
+ $("status")?.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-status]"); if (!b || b.getAttribute("aria-pressed") === "true") return;
+  const d = await save({ status: b.dataset.status }); if (!d) return;
+  for (const x of $("status").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x.dataset.status === d.status));
+ });
+ // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels). Edits run one after another and each starts
+ // from the list the previous one saved, so two quick clicks can't bring a removed tag back.
+ let queue = Promise.resolve();
+ const editTags = (change) => (queue = queue.then(async () => { const d = await save({ tags: change(tags) }); if (d) tags = d.tags; renderTags(); }));
+ const renderTags = () => {
+  const box = $("tags"); if (!box) return; box.textContent = "";
+  tags.forEach((t, i) => {
+   const s = document.createElement("span"); s.className = "tag" + (i === 0 ? " type" : ""); s.dataset.tag = t; s.append(t);
+   const x = document.createElement("button"); x.type = "button"; x.innerHTML = X; x.setAttribute("aria-label", "Remover tag " + t);
+   x.onclick = () => { s.style.opacity = ".5"; x.disabled = true; editTags((list) => list.filter((y) => y !== t)); };
+   s.append(x); box.append(s);
+  });
+  const add = document.createElement("button"); add.type = "button"; add.className = "add"; add.id = "add-tag"; add.textContent = "+ tag";
+  add.onclick = () => {
+   const inp = document.createElement("input"); inp.className = "add-input"; inp.id = "new-tag"; inp.maxLength = 30; inp.setAttribute("aria-label", "Nova tag");
+   let done = false;
+   const finish = async (keep) => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (keep && v) editTags((list) => [...list, v]); else renderTags();
+   };
+   inp.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
+   inp.onblur = () => finish(true);
+   add.replaceWith(inp); inp.focus();
+  };
+  box.append(add);
+ };
+ renderTags();
+ // Delete: in-page confirmation, no browser dialog
+ $("delete").onclick = () => { $("confirm").hidden = false; $("delete").hidden = true; $("confirm-delete").focus(); };
+ $("cancel-delete").onclick = () => { $("confirm").hidden = true; $("delete").hidden = false; };
+ $("confirm-delete").onclick = async () => {
+  $("confirm-delete").disabled = true;
+  const r = await fetch(api, { method: "DELETE" }).catch(() => null);
+  if (r && r.ok) { location.href = "/painel"; return; }
+  $("confirm-delete").disabled = false; $("msg").textContent = "Não deu para apagar. Tente de novo.";
+ };
+ // Audio player: play/pause, bars light up as it plays, click on the bars to jump
+ const a = $("audio"); if (!a) return;
+ const known = ${r.duration_s ?? 0}, total = () => (Number.isFinite(a.duration) && a.duration > 0 ? a.duration : known);
+ const fmt = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+ const bars = [...$("bars").children];
+ const tick = () => { const t = total(), f = t ? a.currentTime / t : 0; bars.forEach((b, i) => b.classList.toggle("on", i < Math.round(f * bars.length))); $("time").textContent = fmt(a.currentTime) + " / " + fmt(t); };
+ $("play").onclick = () => (a.paused ? a.play().catch(() => {}) : a.pause());
+ a.addEventListener("play", () => { $("play").innerHTML = ${JSON.stringify(PAUSE)}; $("play").setAttribute("aria-label", "Pausar"); });
+ a.addEventListener("pause", () => { $("play").innerHTML = ${JSON.stringify(PLAY)}; $("play").setAttribute("aria-label", "Ouvir"); });
+ a.addEventListener("timeupdate", tick); a.addEventListener("loadedmetadata", tick);
+ $("bars").onclick = (e) => { const box = $("bars").getBoundingClientRect(), t = total(); if (t) { a.currentTime = Math.max(0, Math.min(t, ((e.clientX - box.left) / box.width) * t)); tick(); } };
+})();
+</script>`);
 };
 
 // Privacy page (ADR 0005): what is kept, why, and deletion by e-mail. Linked from the consent checkbox.

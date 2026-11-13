@@ -13,7 +13,7 @@ export const RATE_LIMIT = 5;                   // drafts per IP per minute
 export const MAX_PHOTOS = 10;                  // photos per message
 export const MAX_PHOTO_BYTES = 20 * 1024 * 1024; // one photo (the browser sends ≤ 2000 px WebP; the original only if it can't decode it)
 export const MAX_TRACK_BYTES = 20 * 1024 * 1024; // the audio track of a video (ADR 0003), ~1.5 MB for 90 s of Opus
-const BUCKET = "coffee-time-media";            // same bucket as the MEDIA binding in wrangler.jsonc
+export const BUCKET = "coffee-time-media";            // same bucket as the MEDIA binding in wrangler.jsonc
 
 // Cloudflare's documented Turnstile test secrets (always pass / always fail / token already spent).
 // Answered without a network call only in local dev, so `npm run verify` works offline.
@@ -37,7 +37,7 @@ export const isLocalDev = (env: Env, url: string) => {
   const host = new URL(url).hostname;
   return env.DEV_OPEN === "1" && (host === "localhost" || host === "127.0.0.1");
 };
-const s3Of = (env: Env): S3 | null =>
+export const s3Of = (env: Env): S3 | null =>
   env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_ACCOUNT_ID
     ? { accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY, host: `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, region: "auto" }
     : null;
