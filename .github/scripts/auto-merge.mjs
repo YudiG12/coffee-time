@@ -5,6 +5,7 @@
 // Each Codex verdict is bound to the commit it reviewed; only the exact Codex bot identity counts.
 const { GITHUB_REPOSITORY: R, GH_TOKEN, PR, DRY_RUN } = process.env;
 const CODEX = "chatgpt-codex-connector[bot]";
+const OWNER = R.split("/")[0];
 // Sensitive = could loosen security. Only flagged 🔒 in the changelog, never blocks.
 const SENSITIVE_PATH = /^(wrangler.*\.jsonc|src\/auth\.ts|SECURITY\.md|\.github\/|migrations\/)/;
 const SENSITIVE_CODE = /cf-access|ACCESS_|AGENT_TOKEN|DEV_OPEN|workers_dev|preview_urls|"routes?"\s*:|custom_domain|Access-Control|cors|safeEqual|unauthorized|guard|turnstile|presign|signed url/i;
@@ -35,6 +36,23 @@ if (pr.head.repo?.full_name !== R) {
   stop(`PR ${PR} from ${pr.head.repo?.full_name ?? "a deleted fork"}: held for the owner`);
 }
 const head = pr.head.sha;
+const files = await all(`/pulls/${PR}/files`);
+// The two ways a PR could merge itself past the guards: change the workflows that judge it, or delete an auth check.
+// Everything else merges alone; these wait for the owner.
+const workflows = files.filter((f) => /^\.github\/workflows\//.test(f.filename)).map((f) => f.filename);
+const authRemoved = files.some((f) => (f.patch || "").split("\n").some((l) => /^-(?!--)/.test(l) && /check\(\s*["'`]auth:/.test(l)));
+if (workflows.length || authRemoved) {
+  // Released by an "/approve" comment from the owner written after the head commit (a new push needs a new one)
+  const pushedAt = (await api(`/commits/${head}`)).commit.committer.date;
+  const comments = await all(`/issues/${PR}/comments`);
+  const approved = comments.some((c) => c.user?.login === OWNER && /^\/approve\b/m.test(c.body || "") && c.created_at > pushedAt);
+  if (!approved) {
+    const mark = `<!-- held ${head} -->`;
+    const why = workflows.length ? `it changes CI workflows (${workflows.map((f) => `\`${f}\``).join(", ")})` : "it removes or rewrites an `auth:` check";
+    if (!comments.some((c) => c.body?.includes(mark))) await comment(`${mark}\n⏸️ Held for @${OWNER}: ${why}. Comment \`/approve\` to let it merge.`);
+    stop("held: workflows or auth checks changed");
+  }
+}
 
 // Verdicts: one per Codex review/comment, each tied to the commit it names
 const PASS = /Didn't find any major issues|VERDICT:\s*PASS/i, FAIL = /VERDICT:\s*FAIL/i;
@@ -68,12 +86,11 @@ for (const c of await all(`/pulls/${PR}/comments`)) {
 if ((repeated || failedShas.size >= MAX_ROUNDS) && !latest?.pass) {
   await label("circuit-breaker");
   const why = repeated ? `the same finding came back after a fix (\`${repeated}\`)` : `Codex failed ${failedShas.size} commits in a row`;
-  await comment(`🛑 **Circuit breaker:** ${why}. Stopping here — @YudiG12 please take a look.`);
+  await comment(`🛑 **Circuit breaker:** ${why}. Stopping here — @${OWNER} please take a look.`);
   stop("circuit breaker");
 }
 
 // Sensitive changes no longer wait: they are only flagged (🔒) in the release and changelog
-const files = await all(`/pulls/${PR}/files`);
 const sensitive = files.filter((f) => !TEST_ONLY.test(f.filename)).filter((f) => SENSITIVE_PATH.test(f.filename) || (f.patch || "").split("\n").some((l) => /^[+-]/.test(l) && SENSITIVE_CODE.test(l))).map((f) => f.filename);
 
 const runs = await api(`/commits/${head}/check-runs`);
@@ -89,7 +106,15 @@ if (lastDeploy?.conclusion === "failure") {
   if (!fixes.some((n) => broken.includes(n))) stop(`main deploy is failing (${lastDeploy.html_url}): only the deploy-failed fix may merge`);
 }
 
-await api(`/pulls/${PR}/merge`, { method: "PUT", body: JSON.stringify({ merge_method: "squash", sha: head }) });
+try {
+  await api(`/pulls/${PR}/merge`, { method: "PUT", body: JSON.stringify({ merge_method: "squash", sha: head }) });
+} catch (e) {
+  // Conflict or a moved base: tell the builder (it fixes "merge failed" comments), once per head commit
+  const mark = `<!-- merge-failed ${head} -->`;
+  const done = (await all(`/issues/${PR}/comments`)).some((c) => c.body?.includes(mark));
+  if (!done) await comment(`${mark}\n⚠️ **Merge failed** at \`${head.slice(0, 7)}\`: ${e.message.slice(0, 300)}\nBuilder: rebase on main, resolve, push.`);
+  stop(`merge failed: ${e.message}`);
+}
 await api(`/git/refs/heads/${pr.head.ref}`, { method: "DELETE" }).catch(() => {});
 // Merges made with GITHUB_TOKEN don't auto-close the linked issues: close "Closes #N" explicitly
 for (const [, n] of (pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)) {

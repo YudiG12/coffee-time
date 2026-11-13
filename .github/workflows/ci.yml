@@ -8,15 +8,35 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
+        with: { node-version-file: .nvmrc, cache: npm }
       - run: npm ci
       - run: npm run typecheck
       - uses: gitleaks/gitleaks-action@v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      # Shift left: what would break the deploy fails here, before the merge.
+      - name: Deploy checks (bundle, bindings, migrations)
+        shell: bash
+        run: |
+          npx wrangler deploy --dry-run --outdir .dry-run
+          node scripts/provision.mjs --check
+          # Applied migrations are history: never edit one. New ones are additive (expand, then contract in a later PR).
+          changed=$(git diff --name-only --diff-filter=MDR origin/${{ github.base_ref }}...HEAD -- migrations/)
+          [ -z "$changed" ] || { echo "::error::existing migrations changed: $changed"; exit 1; }
+          for f in $(git diff --name-only --diff-filter=A origin/${{ github.base_ref }}...HEAD -- migrations/); do
+            if grep -qiE '\bDROP\b|\bRENAME\b' "$f"; then echo "::error file=$f::destructive migration (DROP/RENAME). Old code still runs during deploy and on rollback: add first, remove in a later PR."; exit 1; fi
+          done
       - run: sudo apt-get install -y ffmpeg >/dev/null && npx playwright install --with-deps chromium
       - id: verify
         run: npm run verify
         continue-on-error: true
+      # The auth checks of main, run against this PR's code: a PR can't loosen auth by editing its own checks.
+      - id: auth_main
+        name: Auth checks from main
+        continue-on-error: true
+        run: |
+          git show origin/${{ github.base_ref }}:scripts/verify.mjs > scripts/verify.main.mjs 2>/dev/null || { echo "no verify on main yet"; exit 0; }
+          grep -q -- '--only=' scripts/verify.main.mjs || { echo "main's verify has no --only flag yet"; exit 0; }
+          node scripts/verify.main.mjs --only=auth: --out=.verify-out-auth
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: verify-out, path: verify-out }
@@ -37,5 +57,5 @@ jobs:
           node scripts/pr-proof.mjs "$GITHUB_REPOSITORY" "$PR" "$SHA" > proof.md
           id=$(gh api repos/$GITHUB_REPOSITORY/issues/$PR/comments -q '.[] | select(.body | startswith("<!-- pr-proof -->")) | .id' | head -1)
           if [ -n "$id" ]; then gh api -X PATCH repos/$GITHUB_REPOSITORY/issues/comments/$id -F body=@proof.md >/dev/null; else gh pr comment $PR --body-file proof.md; fi
-      - if: steps.verify.outcome == 'failure'
+      - if: steps.verify.outcome == 'failure' || steps.auth_main.outcome == 'failure'
         run: exit 1
