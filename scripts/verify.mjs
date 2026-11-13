@@ -5,7 +5,7 @@
 //   npm run verify            -> all checks + screenshots
 //   npm run verify -- --keep  -> leave the dev server running to explore
 import { spawn, execSync } from "node:child_process";
-import { rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
 
@@ -216,6 +216,89 @@ await check("ui: double click on record starts one recording, tabs lock, stop re
   assert(d > 2.5 && d < 4.5, `duration after the microphone ended: ${d}`);
   await ctx.close();
 });
+// "Envie um arquivo": a WAV generated here and WebM fixtures in scripts/fixtures/ (made with ffmpeg, see README there).
+const wav = (sec, rate = 8000) => {
+  const n = Math.round(sec * rate), b = Buffer.alloc(44 + n);
+  b.write("RIFF", 0); b.writeUInt32LE(36 + n, 4); b.write("WAVE", 8); b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate, 28); b.writeUInt16LE(1, 32); b.writeUInt16LE(8, 34); b.write("data", 36); b.writeUInt32LE(n, 40);
+  for (let i = 0; i < n; i++) b[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 440 * i) / rate));
+  return b;
+};
+const FX = {
+  audio: { name: "mensagem.wav", mimeType: "audio/wav", buffer: wav(3) },
+  audioLong: { name: "longo.wav", mimeType: "audio/wav", buffer: wav(100) },
+  video: { name: "video.webm", mimeType: "video/webm", buffer: readFileSync("scripts/fixtures/video-3s-1080p.webm") },
+  videoLong: { name: "video-longo.webm", mimeType: "video/webm", buffer: readFileSync("scripts/fixtures/video-100s.webm") },
+  text: { name: "nota.txt", mimeType: "text/plain", buffer: Buffer.from("oi") },
+};
+await check("ui: upload a short audio and a short video, see the ready state (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    // The button opens the file picker.
+    const [chooser] = await Promise.all([p.waitForEvent("filechooser", { timeout: 3000 }), p.click("#upload")]);
+    assert(!chooser.isMultiple(), `${name}: picker accepts several files`);
+    await chooser.setFiles(FX.audio);
+    await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+    const ready = await p.locator("#ready").innerText();
+    assert(ready.includes("Áudio pronto") && ready.includes("Trocar áudio") && ready.includes("/ 1:30"), `${name}: audio ready text: ${ready.replace(/\s+/g, " ")}`);
+    assert((await p.locator("#ready-time").innerText()).trim() === "0:03", `${name}: audio time ${await p.locator("#ready-time").innerText()}`);
+    assert((await p.getAttribute("#ready", "data-source")) === "file", `${name}: audio not marked as a file`);
+    assert(!(await p.locator("#upload").isVisible()) && !(await p.locator(".vlog").isVisible()), `${name}: start buttons still visible`);
+    await p.click("#play"); await p.waitForTimeout(500);
+    assert(await p.evaluate(() => !document.getElementById("player").paused), `${name}: uploaded audio does not play`);
+    await p.click("#play"); await p.waitForTimeout(300);
+    await p.screenshot({ path: `${OUT}/upload-audio-${name}.png`, fullPage: true });
+    // "Trocar áudio" picks another file; a video switches to the Video tab and its preview.
+    const [c2] = await Promise.all([p.waitForEvent("filechooser", { timeout: 3000 }), p.click("#redo")]);
+    await c2.setFiles(FX.video);
+    await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
+    assert(!(await p.locator("#ready").isVisible()), `${name}: audio panel still visible with a video`);
+    const v = await p.locator("#vready").innerText();
+    assert(v.includes("Vídeo pronto · 1080p") && v.includes("Trocar vídeo"), `${name}: video ready text: ${v.replace(/\s+/g, " ")}`);
+    assert((await p.locator("#vdur").innerText()).trim() === "0:03", `${name}: video duration ${await p.locator("#vdur").innerText()}`);
+    assert((await p.getAttribute("#tab-video", "aria-selected")) === "true", `${name}: Video tab not selected for a video`);
+    const body = await p.locator("body").innerText();
+    assert(!/anonimiz/i.test(body), `${name}: anonymize option shown for a video`);
+    assert(!/\p{Extended_Pictographic}/u.test(body), `${name}: emoji in the video state`);
+    assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${name}: horizontal scroll`);
+    await p.screenshot({ path: `${OUT}/upload-video-${name}.png`, fullPage: true });
+    await p.click("#vplay"); await p.waitForTimeout(500);
+    assert(await p.evaluate(() => { const x = document.getElementById("vplayer"); return !x.paused && x.currentTime > 0; }), `${name}: video does not play`);
+    await p.click("#vplayer");
+    assert(await p.evaluate(() => document.getElementById("vplayer").paused), `${name}: click on the video did not pause`);
+    // Switching to the Audio tab drops the video.
+    await p.click("#tab-audio");
+    assert(!(await p.locator("#vready").isVisible()) && (await p.locator("#upload").isVisible()), `${name}: Audio tab kept the video`);
+    await ctx.close();
+  }
+});
+await check("ui: a file longer than 90 s (or not audio/video) is refused with a message", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  const msg = "O arquivo tem mais de 90 segundos. Escolha um mais curto.";
+  for (const f of [FX.audioLong, FX.videoLong]) {
+    await p.setInputFiles("#file", f);
+    await p.locator("#rec-error.show").waitFor({ state: "visible", timeout: 8000 });
+    assert((await p.locator("#rec-error").innerText()).trim() === msg, `${f.name}: message "${await p.locator("#rec-error").innerText()}"`);
+    assert((await p.getAttribute("main", "data-state")) === "idle", `${f.name}: long file was accepted`);
+    if (f === FX.videoLong) await p.screenshot({ path: `${OUT}/upload-too-long-mobile.png`, fullPage: true });
+    await p.evaluate(() => document.getElementById("rec-error").classList.remove("show"));
+  }
+  await p.setInputFiles("#file", FX.text);
+  await p.locator("#rec-error.show").waitFor({ state: "visible", timeout: 3000 });
+  assert((await p.locator("#rec-error").innerText()).includes("áudio ou vídeo"), "text file not refused");
+  // A valid file clears the message; a refused file keeps the file already chosen.
+  await p.setInputFiles("#file", FX.video);
+  await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
+  assert(!(await p.locator("#rec-error").isVisible()), "error still shown after a valid file");
+  await p.setInputFiles("#file", FX.videoLong);
+  await p.locator("#rec-error.show").waitFor({ state: "visible", timeout: 8000 });
+  assert(await p.locator("#vready[data-duration]").isVisible(), "a refused file discarded the video already chosen");
+  await ctx.close();
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
@@ -227,6 +310,7 @@ await check("ui: record main flow", async () => {
   await p.goto(BASE + "/", { waitUntil: "networkidle" }); await p.waitForTimeout(1000);
   await p.click("#tab-video"); await p.waitForTimeout(800); await p.click("#tab-audio"); await p.waitForTimeout(600);
   await p.click("#record"); await p.waitForTimeout(2500); await p.click("#stop"); await p.waitForTimeout(1500);
+  await p.click("#tab-video"); await p.waitForTimeout(600); await p.setInputFiles("#file", FX.video); await p.waitForTimeout(1800);
   await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); await p.waitForTimeout(1500);
   const vid = await p.video().path(); await ctx.close();
   try { execSync(`ffmpeg -y -loglevel error -i ${vid} -vf "fps=8,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" ${OUT}/flow.gif`); }

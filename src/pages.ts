@@ -30,6 +30,7 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // Start page: docs/design/mobile-1a-start.png and desktop-1a-start.png.
 // Mobile stacks hero, card, vlog; desktop puts the hero and vlog on the left and the card on the right.
 // Audio recording (MediaRecorder, Opus): *-1b-recording.png, then *-1-audio-ready.png. `max` is the limit in seconds (90; shorter only in local dev).
+// "Envie um arquivo": one audio or video file up to `max` seconds; a video shows *-1c-video-ready.png (no anonymize option for video).
 export const startPage = (max = 90) => layout("Coffee Time", `<style>
 .start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
 .hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
@@ -52,8 +53,8 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 .vlog p{margin:0;color:var(--muted);font-size:14px;line-height:21px}
 .hero > div{min-width:0}
 .panel{border:1px solid var(--line2);border-radius:4px;background:var(--surface)}
-.rec,.ready,.rec-error{display:none}
-.start[data-state="recording"] .rec{display:flex}.start[data-state="ready"] .ready{display:block}
+.rec,.ready,.vready,.rec-error{display:none}
+.start[data-state="recording"] .rec{display:flex}.start[data-state="ready"]:not([data-media="video"]) .ready{display:block}.start[data-state="ready"][data-media="video"] .vready{display:block}
 .start:not([data-state="idle"]) .actions,.start:not([data-state="idle"]) .vlog{display:none}
 .rec{flex-direction:column;align-items:center;padding:36px 20px 44px;border-color:#5C4330}
 .rec-mic{width:72px;height:72px;border-radius:50%;background:rgba(217,123,108,.1);display:flex;align-items:center;justify-content:center;animation:pulse 1.6s ease-in-out infinite}
@@ -72,6 +73,12 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 .ready .status{color:var(--muted);font-size:14px;margin-top:4px}
 .redo{background:none;border:0;color:var(--accent);font:600 15px Onest,system-ui,sans-serif;cursor:pointer;padding:8px 0}
 .bar{height:6px;border-radius:3px;background:#3A2E24;margin-top:16px;overflow:hidden}.bar span{display:block;height:100%;width:0;background:var(--accent);border-radius:3px}
+.vready{padding:12px 12px 6px}
+.vframe{position:relative;aspect-ratio:16/9;border-radius:4px;overflow:hidden;background:linear-gradient(135deg,#4A3526 0%,#2C2018 55%,#1E1712 100%)}
+.vframe video{width:100%;height:100%;object-fit:contain;display:block;cursor:pointer}
+.vframe .play-btn{position:absolute;inset:0;margin:auto}.vframe.playing .play-btn{display:none}
+.dur{position:absolute;right:8px;bottom:8px;padding:3px 6px;border-radius:4px;background:rgba(23,18,14,.8);color:var(--ink);font:500 13px/1 "JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.vmeta{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:14px;padding:4px 0 0}
 .rec-error{color:var(--rec);font-size:14px;text-align:center;margin:12px 0 0}.rec-error.show{display:block}
 @media (min-width:1024px){
  .start{max-width:1292px;grid-template-columns:minmax(0,1fr) minmax(360px,460px);grid-template-areas:"hero card" "vlog card";column-gap:clamp(40px,5.5vw,80px);row-gap:40px;align-content:center;padding:48px 40px}
@@ -102,6 +109,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
   <button class="btn primary" id="record" data-kind="audio"><span id="record-icon">${icon(MIC, 22)}</span><span id="record-label">Gravar áudio</span></button>
   <button class="btn secondary" id="upload">${icon(UPLOAD, 18)}Envie um arquivo</button>
  </div>
+ <input type="file" id="file" accept="audio/*,video/*" hidden>
  <p class="rec-error" id="rec-error" role="alert"></p>
  <div class="panel rec" id="recorder" aria-live="polite">
   <div class="rec-mic"><span>${icon(MIC, 24)}</span></div>
@@ -113,11 +121,19 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
  <div class="panel ready" id="ready">
   <div class="row">
    <button class="play-btn" id="play" aria-label="Ouvir gravação">${PLAY.replace('width="14" height="14"', 'width="18" height="18"')}</button>
-   <div class="info"><div class="time"><span id="ready-time">0:00</span><small>/ ${fmt(max)}</small></div><div class="status">Gravação pronta</div></div>
+   <div class="info"><div class="time"><span id="ready-time">0:00</span><small>/ ${fmt(max)}</small></div><div class="status" id="ready-status">Gravação pronta</div></div>
    <button class="redo" id="redo">Regravar</button>
   </div>
   <div class="bar"><span id="ready-bar"></span></div>
   <audio id="player" preload="metadata" hidden></audio>
+ </div>
+ <div class="panel vready" id="vready">
+  <div class="vframe" id="vframe">
+   <video id="vplayer" preload="metadata" playsinline></video>
+   <button class="play-btn" id="vplay" aria-label="Ver vídeo">${PLAY.replace('width="14" height="14"', 'width="18" height="18"')}</button>
+   <span class="dur" id="vdur">0:00</span>
+  </div>
+  <div class="vmeta"><span id="vstatus">Vídeo pronto</span><button class="redo" id="vswap">Trocar vídeo</button></div>
  </div>
 </section>
 <section class="vlog">
@@ -136,31 +152,40 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
  const $ = (id) => document.getElementById(id);
  const main = document.querySelector(".start"), tabs = document.querySelectorAll(".tab"), rec = $("record"), err = $("rec-error"), player = $("player");
  const fmt = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
- let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "", busy = false;
- // One recording at a time: lock the start controls while the microphone prompt is open.
- const lock = (on) => { busy = on; rec.disabled = on; $("redo").disabled = on; tabs.forEach((t) => (t.disabled = on)); };
+ const file = $("file"), vplayer = $("vplayer");
+ let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "", busy = false, source = "record";
+ // One recording or file at a time: lock the start controls while the microphone prompt is open or a file is read.
+ const lock = (on) => { busy = on; ["record", "redo", "upload", "vswap"].forEach((id) => ($(id).disabled = on)); tabs.forEach((t) => (t.disabled = on)); };
  const setState = (s) => { main.dataset.state = s; tabs.forEach((t) => (t.disabled = s === "recording")); };
- const discard = () => { player.pause(); if (url) URL.revokeObjectURL(url); url = ""; $("ready").removeAttribute("data-duration"); setState("idle"); };
-
- tabs.forEach((t) => t.addEventListener("click", () => {
-  const kind = t.dataset.kind;
-  if (kind === rec.dataset.kind) return; // already selected: keep the recording
-  if (main.dataset.state === "ready") discard();
-  tabs.forEach((x) => x.setAttribute("aria-selected", String(x === t)));
+ const discard = () => {
+  player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src");
+  if (url) URL.revokeObjectURL(url); url = "";
+  $("ready").removeAttribute("data-duration"); $("vready").removeAttribute("data-duration"); delete main.dataset.media; setState("idle");
+ };
+ const fail = (msg) => { err.textContent = msg; err.classList.add("show"); };
+ const select = (kind) => {
+  tabs.forEach((x) => x.setAttribute("aria-selected", String(x.dataset.kind === kind)));
   rec.dataset.kind = kind;
   $("record-icon").innerHTML = icons[kind];
   $("record-label").textContent = labels[kind];
+ };
+
+ tabs.forEach((t) => t.addEventListener("click", () => {
+  if (t.dataset.kind === rec.dataset.kind) return; // already selected: keep the recording or file
+  if (main.dataset.state === "ready") discard();
+  select(t.dataset.kind);
  }));
 
  const elapsed = () => Math.min((performance.now() - started) / 1000, MAX);
  const start = async () => {
   if (busy || (recorder && recorder.state !== "inactive")) return;
-  lock(true); err.classList.remove("show");
+  lock(true); err.classList.remove("show"); source = "record";
+  $("ready-status").textContent = "Gravação pronta"; $("redo").textContent = "Regravar";
   try {
    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch {
-   err.textContent = "Não foi possível usar o microfone. Verifique a permissão do navegador.";
-   err.classList.add("show"); setState("idle"); lock(false); return;
+   fail("Não foi possível usar o microfone. Verifique a permissão do navegador.");
+   setState("idle"); lock(false); return;
   }
   const type = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m));
   recorder = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined);
@@ -174,8 +199,8 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
    url = URL.createObjectURL(blob); player.src = url;
    $("ready-time").textContent = fmt(Math.max(1, Math.round(duration)));
    $("ready-bar").style.width = (duration / MAX) * 100 + "%";
-   Object.assign($("ready").dataset, { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type });
-   setState("ready");
+   Object.assign($("ready").dataset, { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type, source: "record" });
+   main.dataset.media = "audio"; setState("ready");
   };
   recorder.start(250); lock(false);
   started = performance.now(); $("timer").textContent = "0:00"; setState("recording");
@@ -186,9 +211,59 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
   recorder.stop();
  };
 
+ // Reads duration (and height for video) from the file itself. Some WebM files (e.g. from MediaRecorder)
+ // have no duration in the header: seeking to the end makes the browser compute it.
+ const probe = (src, kind) => new Promise((ok, no) => {
+  const m = document.createElement(kind); m.preload = "metadata"; m.muted = true;
+  const done = () => ok({ duration: m.duration, height: m.videoHeight || 0 });
+  const timer = setTimeout(no, 15000);
+  m.onerror = () => { clearTimeout(timer); no(); };
+  m.onloadedmetadata = () => {
+   if (Number.isFinite(m.duration)) { clearTimeout(timer); return done(); }
+   m.ondurationchange = () => { if (Number.isFinite(m.duration)) { clearTimeout(timer); m.ondurationchange = null; done(); } };
+   m.currentTime = 1e9;
+  };
+  m.src = src;
+ });
+ const pick = async () => {
+  const f = file.files[0]; file.value = "";
+  if (!f || busy) return;
+  err.classList.remove("show");
+  const kind = f.type.startsWith("video/") ? "video" : f.type.startsWith("audio/") ? "audio" : "";
+  if (!kind) return fail("Escolha um arquivo de áudio ou vídeo.");
+  const src = URL.createObjectURL(f);
+  lock(true);
+  const meta = await probe(src, kind).catch(() => null);
+  lock(false);
+  if (!meta || !(meta.duration > 0)) { URL.revokeObjectURL(src); return fail("Não foi possível abrir este arquivo. Tente outro."); }
+  if (meta.duration > MAX + 0.5) { URL.revokeObjectURL(src); return fail("O arquivo tem mais de " + MAX + " segundos. Escolha um mais curto."); }
+  discard(); select(kind); url = src; source = "file"; duration = Math.min(meta.duration, MAX);
+  const data = { duration: meta.duration.toFixed(2), bytes: String(f.size), type: f.type, source: "file" };
+  if (kind === "audio") {
+   player.src = src;
+   $("ready-time").textContent = fmt(Math.max(1, Math.round(duration)));
+   $("ready-bar").style.width = (duration / MAX) * 100 + "%";
+   $("ready-status").textContent = "Áudio pronto"; $("redo").textContent = "Trocar áudio";
+   Object.assign($("ready").dataset, data);
+  } else {
+   vplayer.src = src;
+   $("vdur").textContent = fmt(Math.max(1, Math.round(duration)));
+   $("vstatus").textContent = "Vídeo pronto" + (meta.height ? " · " + meta.height + "p" : "");
+   Object.assign($("vready").dataset, data, { height: String(meta.height) });
+  }
+  main.dataset.media = kind; setState("ready");
+ };
+
  rec.addEventListener("click", () => { if (rec.dataset.kind === "audio") start(); });
  $("stop").addEventListener("click", stop);
- $("redo").addEventListener("click", () => { discard(); start(); });
+ $("upload").addEventListener("click", () => file.click());
+ $("vswap").addEventListener("click", () => file.click());
+ file.addEventListener("change", pick);
+ $("redo").addEventListener("click", () => { if (source === "file") return file.click(); discard(); start(); });
+ const vtoggle = () => (vplayer.paused ? vplayer.play() : vplayer.pause());
+ $("vplay").addEventListener("click", vtoggle); vplayer.addEventListener("click", vtoggle);
+ vplayer.addEventListener("play", () => $("vframe").classList.add("playing"));
+ vplayer.addEventListener("pause", () => $("vframe").classList.remove("playing"));
  $("play").addEventListener("click", () => (player.paused ? player.play() : player.pause()));
  player.addEventListener("play", () => { $("play").innerHTML = icons.pause; $("play").setAttribute("aria-label", "Pausar"); });
  player.addEventListener("pause", () => { $("play").innerHTML = icons.play; $("play").setAttribute("aria-label", "Ouvir gravação"); });
