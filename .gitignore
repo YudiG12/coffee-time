@@ -4,3 +4,4 @@ node_modules/
 .verify/
 verify-out/
 .DS_Store
+public/media.js

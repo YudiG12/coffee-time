@@ -23,6 +23,8 @@ const assert = (c, msg) => { if (!c) throw new Error(msg); };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 rmSync(".verify", { recursive: true, force: true }); rmSync(OUT, { recursive: true, force: true }); mkdirSync(OUT, { recursive: true });
+console.log("build public/media.js (browser-side media work)…");
+sh("node scripts/build-site.mjs");
 console.log("migrate + seed (isolated local D1)…");
 sh(`npx wrangler d1 migrations apply coffee-time --local --persist-to ${STATE}`);
 sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --file scripts/demo-seed.sql`);
@@ -185,6 +187,37 @@ await check("api: photo URLs only for slots 1–10, images ≤ 20 MB, open draft
   assert((await post(`/api/drafts/${sentId}/photos`, { n: 1, type: "image/png", size: 100 })).status === 404, "photo URL for a sent message");
   assert((await putFile(`/api/drafts/${sentId}/photo-2`, PNG, "image/png")) === 404, "upload to a sent message accepted");
   assert((await putFile(`/api/drafts/${d.id}/photo-11`, PNG, "image/png")) === 404, "slot 11 accepted");
+});
+await check("api: draft files — media again (same kind) and a video's audio track; Send with track moves it and saves audio_key", async () => {
+  const a = await newDraft("audio", wav(1), "audio/wav"), v = await newDraft("video", VIDEO_FX, "video/webm");
+  for (const [id, b] of [[a.id, { file: "photo-1", type: "audio/webm", size: 10 }], [a.id, { file: "media", type: "video/webm", size: 10 }], [a.id, { file: "audio", type: "audio/webm", size: 10 }],
+    [a.id, { file: "media", type: "audio/webm", size: 300 * 1024 * 1024 + 1 }], [v.id, { file: "audio", type: "video/webm", size: 10 }], [v.id, { file: "audio", type: "audio/webm", size: 20 * 1024 * 1024 + 1 }], [v.id, { file: "audio", type: "audio/webm", size: 0 }]]) {
+    const r = await post(`/api/drafts/${id}/files`, b); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`);
+  }
+  assert((await post("/api/drafts/nope/files", { file: "media", type: "audio/wav", size: 10 })).status === 404, "unknown draft");
+  assert((await post(`/api/drafts/${sentId}/files`, { file: "media", type: "audio/wav", size: 10 })).status === 404, "file URL for a sent message");
+  // The media replaced in place: the second upload overwrites the first.
+  const AUDIO = wav(2), AUDIO2 = wav(1.5);
+  await putFile(a.upload.url, AUDIO, "audio/wav");
+  const m = await post(`/api/drafts/${a.id}/files`, { file: "media", type: "audio/wav", size: AUDIO2.length });
+  assert(m.status === 201 && m.body.key === `incoming/${a.id}/media`, `media again → ${m.status} ${JSON.stringify(m.body)}`);
+  assert((await putFile(m.body.upload.url, AUDIO2, "audio/wav")) === 200 && r2get(`incoming/${a.id}/media`).equals(AUDIO2), "media not replaced");
+  // A video with its audio track.
+  await putFile(v.upload.url, VIDEO_FX, "video/webm");
+  const early = await post(`/api/drafts/${v.id}/send`, { consent: true, track: true }); assert(early.status === 409, `track missing → ${early.status}`);
+  const TRACK = wav(3), t = await post(`/api/drafts/${v.id}/files`, { file: "audio", type: "audio/wav", size: TRACK.length });
+  assert(t.status === 201 && t.body.key === `incoming/${v.id}/audio`, `track → ${t.status} ${JSON.stringify(t.body)}`);
+  assert((await putFile(t.body.upload.url, TRACK, "audio/wav")) === 200, "track upload failed");
+  const r = await post(`/api/drafts/${v.id}/send`, { consent: true, track: true }); assert(r.status === 200, `send → ${r.status}`);
+  const row = await mcpData("get_submission", { id: v.id });
+  assert(row.audio_key === `media/${v.id}/audio` && r2get(`media/${v.id}/audio`).equals(TRACK) && !r2has(`incoming/${v.id}/audio`), `audio_key ${row.audio_key}`);
+  // A text file posing as the track is refused like any other file.
+  const v2 = await newDraft("video", VIDEO_FX, "video/webm"); await putFile(v2.upload.url, VIDEO_FX, "video/webm");
+  const t2 = await post(`/api/drafts/${v2.id}/files`, { file: "audio", type: "audio/webm", size: 200 }); await putFile(t2.body.upload.url, Buffer.alloc(200, 65), "audio/webm");
+  const r2 = await post(`/api/drafts/${v2.id}/send`, { consent: true, track: true });
+  assert(r2.status === 422 && JSON.stringify(r2.body.files) === '["audio"]' && !r2has(`incoming/${v2.id}/audio`), `fake track → ${r2.status} ${JSON.stringify(r2.body)}`);
+  // An audio message never gets a track, and a sent one without it keeps audio_key empty.
+  assert((await mcpData("get_submission", { id: sentId })).audio_key === null, "audio message with audio_key");
 });
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
@@ -552,7 +585,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
   for (const [vp, name, desktop] of [[{ width: 390, height: 844 }, "mobile", false], [{ width: 1440, height: 900 }, "desktop", true]]) {
     const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
     const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
-    await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
     assert(!(await p.locator("#form").isVisible()), `${name}: form shown before there is media`);
     await p.setInputFiles("#file", FX.audio);
     await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
@@ -596,7 +629,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
 await check("ui: anonymous audio is saved without a name; a video has no Anonimizar voz and keeps the name", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
   const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
-  await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
   await p.setInputFiles("#file", FX.video);
   await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
   assert(!(await p.locator("#anon").isVisible()) && (await p.locator("#name").isVisible()), "video: Anonimizar voz shown or name hidden");
@@ -611,17 +644,125 @@ await check("ui: anonymous audio is saved without a name; a video has no Anonimi
   assert(row.anonymous === 1 && row.name === null && row.status === "new", JSON.stringify(row));
   await ctx.close();
 });
-// The switch promises a distorted voice; until the distortion (#9) exists the real page must not offer it.
-await check("ui: without the voice distortion the page has no Anonimizar voz (name always shown)", async () => {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
-  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+// ---- Media work in the browser (ADR 0003). Stored files are inspected in a page (Web Audio, <video>, ImageBitmap).
+const FX4K = { name: "video-4k.webm", mimeType: "video/webm", buffer: readFileSync("scripts/fixtures/video-2s-4k.webm") };
+// A "voice": 220 Hz with 10 harmonics, 16-bit 24 kHz. The distortion moves the pitch to ~172 Hz (×0.78).
+const voiceWav = (sec, f0 = 220, rate = 24000) => {
+  const n = Math.round(sec * rate), b = Buffer.alloc(44 + n * 2);
+  b.write("RIFF", 0); b.writeUInt32LE(36 + n * 2, 4); b.write("WAVE", 8); b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write("data", 36); b.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) { let x = 0; for (let h = 1; h <= 10; h++) x += (0.3 / h) * Math.sin((2 * Math.PI * f0 * h * i) / rate); b.writeInt16LE(Math.round(x * 0x7fff), 44 + i * 2); }
+  return b;
+};
+const VOICE = { name: "voz.wav", mimeType: "audio/wav", buffer: voiceWav(3) };
+// Pitch (autocorrelation, 60–600 Hz) and duration of an audio file, decoded by the browser.
+const pitchOf = (p, buf) => p.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)), SR = 24000;
+  const a = await new OfflineAudioContext(1, 1, SR).decodeAudioData(bytes.buffer), y = a.getChannelData(0);
+  let best = 0, lag = 0; const from = Math.floor(y.length / 3);
+  for (let l = 40; l < 400; l++) { let s = 0; for (let i = from; i < from + 8000; i++) s += y[i] * y[i + l]; if (s > best) { best = s; lag = l; } }
+  return { f0: SR / lag, duration: a.duration };
+}, buf.toString("base64"));
+const mediaSize = (p, buf, type) => p.evaluate(async ([b64, type]) => {
+  const blob = new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type });
+  if (type.startsWith("image/")) { const i = await createImageBitmap(blob); return { width: i.width, height: i.height }; }
+  const v = document.createElement("video"); v.muted = true; v.src = URL.createObjectURL(blob);
+  await new Promise((ok, no) => { v.onloadedmetadata = ok; v.onerror = () => no(new Error("video does not decode")); });
+  return { width: v.videoWidth, height: v.videoHeight };
+}, [buf.toString("base64"), type]);
+const newPage = async (vp = { width: 390, height: 844 }) => {
+  const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  return { ctx, p };
+};
+const sendForm = async (p) => {
+  if (!(await p.locator("#consent").isChecked())) await p.click("#consent");
+  const id = await p.getAttribute("#up", "data-draft");
+  await p.click("#send"); await p.locator("#thanks").waitFor({ state: "visible", timeout: 20000 });
+  return mcpData("get_submission", { id });
+};
+await check("ui: anonymous audio is distorted in the browser (pitch 220 → ~172 Hz) and the original never reaches media/", async () => {
+  const { ctx, p } = await newPage();
+  const puts = []; await p.route("**/api/drafts/*/media", (r) => { if (r.request().method() === "PUT") puts.push(r.request().postDataBuffer()); return r.continue(); });
   await p.goto(BASE + "/", { waitUntil: "networkidle" });
-  await p.setInputFiles("#file", FX.audio);
-  await p.locator("#form").waitFor({ state: "visible", timeout: 8000 });
-  assert(await p.locator("#anon, .anon").count() === 0, "Anonimizar voz switch in the page");
-  assert(!/anonimiz|distorcid/i.test(await p.locator("body").innerText()), "page text promises a distorted voice");
-  assert(await p.locator("#name").isVisible(), "name hidden");
-  await p.screenshot({ path: `${OUT}/form-audio-default-mobile.png`, fullPage: true });
+  const t = (await p.locator("body").innerText()); assert(!/\p{Extended_Pictographic}/u.test(t), "emoji");
+  await p.setInputFiles("#file", VOICE);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 10000 });
+  const id = await p.getAttribute("#up", "data-draft");
+  assert(r2get(`incoming/${id}/media`).equals(VOICE.buffer), "not anonymous yet: the file should go up as picked");
+  assert((await pitchOf(p, VOICE.buffer)).f0 > 210, "fixture pitch");
+  // On: the distorted voice replaces the file in the same draft.
+  await p.click("#anon");
+  await p.locator("#up[data-state=done][data-anon=true]").waitFor({ state: "visible", timeout: 15000 });
+  assert((await p.getAttribute("#up", "data-draft")) === id, "a new draft was created instead of replacing the file");
+  const stored = r2get(`incoming/${id}/media`), { f0, duration } = await pitchOf(p, stored);
+  assert(!stored.equals(VOICE.buffer) && f0 > 150 && f0 < 190 && Math.abs(duration - 3) < 0.2, `distorted: f0 ${f0.toFixed(1)} Hz, ${duration.toFixed(2)} s, ${stored.length} bytes`);
+  await p.screenshot({ path: `${OUT}/anon-distorted-mobile.png`, fullPage: true });
+  // With the switch on, a new file is distorted before its first upload: the original never goes up.
+  const before = puts.length, OTHER = { ...VOICE, name: "outra.wav", buffer: voiceWav(2.5, 200) };
+  const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.click("#redo")]); await chooser.setFiles(OTHER);
+  await p.waitForFunction((old) => { const u = document.getElementById("up").dataset; return u.draft && u.draft !== old && u.state === "done" && u.anon === "true"; }, id, { timeout: 15000 });
+  assert(puts.length > before, `no upload seen after the swap (${puts.length})`);
+  assert(puts.slice(before).every((b) => b && !b.equals(OTHER.buffer)), `the original of an anonymous audio was uploaded (${puts.slice(before).map((b) => b?.length)}, original ${OTHER.buffer.length})`);
+  const row = await sendForm(p);
+  const kept = r2get(row.media_key), k = await pitchOf(p, kept);
+  assert(row.anonymous === 1 && row.name === null && !kept.equals(OTHER.buffer) && k.f0 > 140 && k.f0 < 170, `saved: ${JSON.stringify(row)} f0 ${k.f0.toFixed(1)}`);
+  await ctx.close();
+});
+await check("ui: a 4K video is re-encoded to ≤ 1920 px wide and its audio track goes up as a separate file", async () => {
+  const { ctx, p } = await newPage({ width: 1440, height: 900 });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX4K);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 60000 });
+  assert((await p.locator("#vstatus").innerText()).trim() === "Vídeo pronto · 1080p", `status ${await p.locator("#vstatus").innerText()}`);
+  assert(!(await p.locator("#up-note").isVisible()), "warning shown with WebCodecs");
+  await p.screenshot({ path: `${OUT}/video-4k-compressed-desktop.png`, fullPage: true });
+  await p.fill("#name", "Teste 4K");
+  const row = await sendForm(p);
+  const video = r2get(row.media_key), size = await mediaSize(p, video, "video/mp4");
+  assert(size.width <= 1920 && size.height <= 1080 && size.width >= 1900, `stored ${size.width}×${size.height}`);
+  assert(!video.equals(FX4K.buffer), "4K original stored");
+  assert(row.audio_key === `media/${row.id}/audio`, `audio_key ${row.audio_key}`);
+  const track = await pitchOf(p, r2get(row.audio_key));
+  assert(Math.abs(track.duration - 2) < 0.3, `track duration ${track.duration}`);
+  await ctx.close();
+});
+await check("ui: photos are stored as WebP ≤ 2000 px", async () => {
+  const { ctx, p } = await newPage();
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  const big = Buffer.from(await p.evaluate(async () => {
+    const c = new OffscreenCanvas(3000, 2000), g = c.getContext("2d"); g.fillStyle = "#6B4A2E"; g.fillRect(0, 0, 3000, 2000); g.fillStyle = "#E0A35A"; g.fillRect(300, 300, 1200, 900);
+    const b = await (await c.convertToBlob({ type: "image/png" })).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(b)));
+  }), "base64");
+  await p.setInputFiles("#file", FX.audio); await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await p.setInputFiles("#photo-file", [{ name: "grande.png", mimeType: "image/png", buffer: big }]);
+  const row = await sendForm(p), keys = JSON.parse(row.photo_keys);
+  assert(keys.length === 1, `photo_keys ${row.photo_keys}`);
+  const photo = r2get(keys[0]), s = await mediaSize(p, photo, "image/webp");
+  assert(photo.subarray(0, 4).toString() === "RIFF" && photo.subarray(8, 12).toString() === "WEBP", "stored photo is not WebP");
+  assert(Math.max(s.width, s.height) === 2000 && s.height === 1333 && photo.length < big.length, `stored ${s.width}×${s.height}, ${photo.length} bytes`);
+  await ctx.close();
+});
+await check("ui: without WebCodecs a video goes up as picked with a short warning; anonymous audio is still distorted", async () => {
+  const { ctx, p } = await newPage();
+  await ctx.addInitScript(() => { delete window.VideoEncoder; delete window.VideoDecoder; delete window.AudioEncoder; delete window.AudioDecoder; });
+  let release; const held = new Promise((r) => (release = r));
+  await p.route("**/api/drafts/*/media", async (r) => { await held; await r.continue(); });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX4K);
+  await p.locator("#up[data-state=uploading][data-draft]").waitFor({ state: "visible", timeout: 10000 });
+  assert((await p.locator("#up-note").innerText()).trim() === "Seu navegador não comprime vídeos. O envio pode demorar mais.", `note: ${await p.locator("#up-note").innerText()}`);
+  await p.screenshot({ path: `${OUT}/video-no-webcodecs-mobile.png`, fullPage: true });
+  release();
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 10000 });
+  const row = await sendForm(p);
+  assert(r2get(row.media_key).equals(FX4K.buffer) && row.audio_key === null, `stored: ${JSON.stringify(row)}`);
+  // The voice distortion needs only Web Audio: without WebCodecs it goes up as WAV.
+  await p.click("#again"); await p.locator("#upload").waitFor({ state: "visible" });
+  await p.setInputFiles("#file", VOICE); await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await p.click("#anon"); await p.locator("#up[data-state=done][data-anon=true]").waitFor({ state: "visible", timeout: 15000 });
+  const a = await sendForm(p), stored = r2get(a.media_key), { f0 } = await pitchOf(p, stored);
+  assert(stored.subarray(0, 4).toString() === "RIFF" && f0 > 150 && f0 < 190, `anonymous without WebCodecs: f0 ${f0}`);
   await ctx.close();
 });
 await check("ui: Enviar waits for an upload still running, then sends", async () => {

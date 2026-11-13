@@ -42,9 +42,11 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // background, with the progress row of *-1c-video-ready.png ("Carregando vídeo 62%") and "Arquivo carregado" at the end.
 // Ready form (*-1-audio-ready.png): Anonimizar voz (audio only, hides the name), optional name, up to 10 photos, consent,
 // Enviar (only with media + consent). Send waits for the uploads, calls /api/drafts/:id/send, then shows *-2-thanks.png.
-// `anonVoice`: the "Anonimizar voz" switch promises a distorted voice, which needs the browser-side distortion of
-// ADR 0003 (issue #9). Until that ships the switch is left out of the page; local dev can show it with ?anon=1.
-export const startPage = (max = 90, siteKey = "", anonVoice = false) => layout("Coffee Time", `<style>
+// Browser-side media work (ADR 0003, src/site/media.ts → /media.js, loaded on the first file): before each upload
+// anonymous audio is distorted, a video is re-encoded to 1080p ~5 Mbps with its audio track uploaded alongside, and
+// photos become ≤ 2000 px WebP. Turning "Anonimizar voz" on (or off) replaces the file in the same draft.
+// Without WebCodecs a video goes up as picked, with a short warning.
+export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<style>
 .start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
 .hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
 .hero img{width:96px;height:96px;flex-shrink:0;border-radius:14px;object-fit:cover;box-shadow:0 0 56px 14px rgba(224,163,90,.22)}
@@ -100,6 +102,7 @@ export const startPage = (max = 90, siteKey = "", anonVoice = false) => layout("
 .up[data-state="done"] .done{display:flex;align-items:center;justify-content:center;gap:8px;color:#9DBF8A}.up .done i{width:7px;height:7px;border-radius:50%;background:#9DBF8A}
 .up[data-state="error"] .failed{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--rec);font-family:Onest,system-ui,sans-serif;font-size:14px}
 .up .failed .redo{padding:0;white-space:nowrap}
+.up .up-note{margin:8px 0 0;color:var(--muted);font:400 13px/18px Onest,system-ui,sans-serif}.up[data-state="done"] .up-note,.up[data-state="error"] .up-note{display:none}
 .ts:empty{display:none}.ts{margin-top:12px;display:flex;justify-content:center}
 .form{display:none;margin-top:20px}.start[data-state="ready"] .form{display:block}
 .anon{display:flex;align-items:center;gap:14px;padding:16px 14px;background:#2A2019;border-color:var(--line2)}.start[data-media="video"] .anon{display:none}
@@ -197,11 +200,11 @@ export const startPage = (max = 90, siteKey = "", anonVoice = false) => layout("
   <div class="vmeta"><span id="vstatus">Vídeo pronto</span><button class="redo" id="vswap">Trocar vídeo</button></div>
  </div>
  <div class="form" id="form" data-anon="false">
-${anonVoice ? `  <div class="panel anon">
+  <div class="panel anon">
    <span class="anon-icon">${icon(MASK, 20)}</span>
    <div class="anon-text"><b id="anon-label">Anonimizar voz</b><span>O áudio fica distorcido e sua voz não é reconhecida.</span></div>
    <button class="switch" id="anon" role="switch" aria-checked="false" aria-labelledby="anon-label"><i></i></button>
-  </div>` : ""}
+  </div>
   <div class="field" id="name-field"><label for="name"><b>Nome</b> · opcional</label><input id="name" maxlength="60" autocomplete="name"></div>
   <div class="photos"><ul id="photo-list"></ul><button class="add" id="photo-add" aria-label="Adicionar fotos">${icon(PLUS, 18)}</button><span class="count" id="photo-count">0 / 10 fotos</span></div>
   <input type="file" id="photo-file" accept="image/*" multiple hidden>
@@ -216,6 +219,7 @@ ${anonVoice ? `  <div class="panel anon">
   <div class="bar" role="progressbar" aria-label="Carregamento do arquivo" aria-valuemin="0" aria-valuemax="100"><span id="up-bar"></span></div>
   <div class="done"><i></i>Arquivo carregado</div>
   <div class="failed"><span id="up-error">Não foi possível carregar o arquivo.</span><button class="redo" id="up-retry">Tentar de novo</button></div>
+  <p class="up-note" id="up-note" hidden>Seu navegador não comprime vídeos. O envio pode demorar mais.</p>
  </div>
  <div class="thanks" id="thanks" aria-live="polite">
   <div class="head"><img src="/yudi.jpg" alt="" width="96" height="96"><div><h2 tabindex="-1" id="thanks-title">Valeu demais! ${icon(PARTY, 26)}</h2><p id="thanks-text">Obrigado por mandar sua mensagem. Vou ouvir com calma, com um café do lado. Se ela entrar num vídeo, você vai ver no canal.</p></div></div>
@@ -347,10 +351,19 @@ ${anonVoice ? `  <div class="panel anon">
   upload(f, kind, duration);
  };
 
+ // ---- Media work in the browser (ADR 0003): /media.js is loaded once, on the first file or photo.
+ let mediaP = null;
+ const media = () => (mediaP ??= import("/media.js").catch((e) => { mediaP = null; throw e; }));
+ const anonOn = () => $("form").dataset.anon === "true";
+
  // ---- Background upload: draft (Turnstile) → signed URL(s) → R2 incoming/<id>/ ----
  const up = $("up");
- let job = 0, xhr = null, last = null, draft = null, uploadP = Promise.resolve(false);
- const cancelUpload = () => { job++; if (xhr) xhr.abort(); xhr = null; draft = null; delete up.dataset.state; delete up.dataset.draft; };
+ let job = 0, xhr = null, last = null, draft = null, track = false, uploadP = Promise.resolve(false);
+ // keep: the file is replaced inside the same draft (Anonimizar voz, Tentar de novo), so the draft stays.
+ const cancelUpload = (keep = false) => {
+  job++; if (xhr) xhr.abort(); xhr = null; track = false; delete up.dataset.state; delete up.dataset.anon; $("up-note").hidden = true;
+  if (!keep) { draft = null; delete up.dataset.draft; }
+ };
  const progress = (p) => { const v = Math.max(0, Math.min(100, Math.floor(p * 100))); $("up-pct").textContent = v + "%"; $("up-bar").style.width = v + "%"; up.querySelector("[role=progressbar]").setAttribute("aria-valuenow", String(v)); };
  // One fresh Turnstile token per draft (tokens are single use). Interaction-only: the widget shows only if a check is needed.
  let widget = null;
@@ -381,30 +394,62 @@ ${anonVoice ? `  <div class="panel anon">
    try { return await fn(); } catch (e) { if (my !== job || i >= 2) throw e; await new Promise((r) => setTimeout(r, 1000 * (i + 1))); }
   }
  };
+ // PUTs one blob to the URL(s) the Worker gave: a single URL or 10 MB multipart parts, each retried.
+ const put = async (u, blob, my, onp) => {
+  if (u.mode === "multipart") {
+   const tags = [];
+   for (let i = 0; i < u.parts.length && my === job; i++) {
+    const part = blob.slice(i * u.part_size, (i + 1) * u.part_size);
+    tags.push(await retry(my, () => send("PUT", u.parts[i], part, my, (n) => onp && onp((i * u.part_size + n) / blob.size))));
+   }
+   const xml = "<CompleteMultipartUpload>" + tags.map((t, i) => "<Part><PartNumber>" + (i + 1) + "</PartNumber><ETag>" + t + "</ETag></Part>").join("") + "</CompleteMultipartUpload>";
+   if (my !== job) throw new Error("abort");
+   await retry(my, () => send("POST", u.complete, xml, my, null, "application/xml"));
+  } else await retry(my, () => send("PUT", u.url, blob, my, (n) => onp && onp(n / blob.size), blob.type));
+ };
+ const fileUrl = async (file, blob) => {
+  const r = await fetch("/api/drafts/" + draft + "/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file, type: blob.type, size: blob.size }) });
+  if (!r.ok) throw new Error("draft");
+  return (await r.json()).upload;
+ };
+ // What goes up: the distorted voice (anonymous audio), the 1080p video and its audio track, or the file as it is.
+ // The original anonymous voice is never uploaded: without the distortion there is no upload at all.
+ const prepare = async (src, kind, anon, my) => {
+  const label = (t) => { $("up-label").textContent = t; progress(0); };
+  if (kind === "audio" && anon) { label("Preparando áudio"); return { blob: await (await media()).distortVoice(src) }; }
+  if (kind !== "video") return { blob: src };
+  const m = await media().catch(() => null);
+  if (!m || !m.hasWebCodecs()) { $("up-note").hidden = false; return { blob: src }; }
+  label("Preparando vídeo");
+  const v = await m.compressVideo(src, (p) => my === job && progress(p)).catch(() => null);
+  if (!v) return { blob: src };
+  if (my === job && v.video !== src) { $("vstatus").textContent = "Vídeo pronto · " + v.height + "p"; $("vready").dataset.height = String(v.height); }
+  return { blob: v.video, track: v.track };
+ };
  // Resolves true once the media is in R2; false when it failed or was replaced.
- const upload = (blob, kind, dur) => (uploadP = runUpload(blob, kind, dur));
- const runUpload = async (blob, kind, dur) => {
-  cancelUpload(); const my = job; last = { blob, kind, dur };
-  $("up-label").textContent = kind === "video" ? "Carregando vídeo" : "Carregando áudio"; progress(0); up.dataset.state = "uploading";
+ const upload = (blob, kind, dur, keep = false) => (uploadP = runUpload(blob, kind, dur, keep && !!draft));
+ const runUpload = async (src, kind, dur, keep) => {
+  cancelUpload(keep); const my = job; last = { blob: src, kind, dur };
+  const anon = kind === "audio" && anonOn();
+  up.dataset.state = "uploading";
   try {
-   const token = await turnstileToken(); if (my !== job) return;
-   const type = blob.type || kind + "/webm";
-   const r = await fetch("/api/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, type, size: blob.size, duration: dur, token }) });
-   if (my !== job) return;
-   if (!r.ok) throw new Error(r.status === 429 ? "rate" : "draft");
-   const d = await r.json(), u = d.upload; up.dataset.draft = d.id; draft = d.id; syncPhotos();
-   if (u.mode === "multipart") {
-    const tags = [];
-    for (let i = 0; i < u.parts.length && my === job; i++) {
-     const part = blob.slice(i * u.part_size, (i + 1) * u.part_size);
-     tags.push(await retry(my, () => send("PUT", u.parts[i], part, my, (n) => progress((i * u.part_size + n) / blob.size))));
-    }
-    const xml = "<CompleteMultipartUpload>" + tags.map((t, i) => "<Part><PartNumber>" + (i + 1) + "</PartNumber><ETag>" + t + "</ETag></Part>").join("") + "</CompleteMultipartUpload>";
-    if (my !== job) return;
-    await retry(my, () => send("POST", u.complete, xml, my, null, "application/xml"));
-   } else await retry(my, () => send("PUT", u.url, blob, my, (n) => progress(n / blob.size), type));
-   if (my !== job) return;
-   progress(1); up.dataset.state = "done"; return true;
+   const prep = await prepare(src, kind, anon, my); if (my !== job) return false;
+   const blob = prep.blob.type ? prep.blob : new Blob([prep.blob], { type: kind + "/webm" });
+   $("up-label").textContent = kind === "video" ? "Carregando vídeo" : "Carregando áudio"; progress(0);
+   let u;
+   if (keep) u = await fileUrl("media", blob);
+   else {
+    const token = await turnstileToken(); if (my !== job) return false;
+    const r = await fetch("/api/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, type: blob.type, size: blob.size, duration: dur, token }) });
+    if (my !== job) return false;
+    if (!r.ok) throw new Error(r.status === 429 ? "rate" : "draft");
+    const d = await r.json(); u = d.upload; up.dataset.draft = d.id; draft = d.id; syncPhotos();
+   }
+   if (my !== job) return false;
+   await put(u, blob, my, progress);
+   if (prep.track && my === job) { await put(await fileUrl("audio", prep.track), prep.track, my, null); track = true; }
+   if (my !== job) return false;
+   progress(1); up.dataset.anon = String(anon); up.dataset.state = "done"; return true;
   } catch (e) {
    if (my !== job) return false;
    $("up-error").textContent = e.message === "rate" ? "Muitas tentativas. Espere um minuto e tente de novo." : "Não foi possível carregar o arquivo.";
@@ -422,11 +467,11 @@ ${anonVoice ? `  <div class="panel anon">
   const prev = slotLock[ph.slot] || Promise.resolve();
   ph.p = prev.then(async () => {
    if (ph.draft !== d || !photos.includes(ph)) return false;
-   const type = ph.file.type || "image/jpeg";
-   const r = await fetch("/api/drafts/" + d + "/photos", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ n: ph.slot, type, size: ph.file.size }) });
+   const blob = await ph.ready, type = blob.type || "image/jpeg";
+   const r = await fetch("/api/drafts/" + d + "/photos", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ n: ph.slot, type, size: blob.size }) });
    if (!r.ok) return false;
    const u = (await r.json()).upload;
-   const put = await fetch(u.url, { method: "PUT", headers: { "content-type": type }, body: ph.file });
+   const put = await fetch(u.url, { method: "PUT", headers: { "content-type": type }, body: blob });
    return put.ok && ph.draft === d;
   }).catch(() => false);
   slotLock[ph.slot] = ph.p;
@@ -438,7 +483,9 @@ ${anonVoice ? `  <div class="panel anon">
   for (const f of picked) {
    if (photos.length >= 10) break;
    const used = new Set(photos.map((x) => x.slot)), slot = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].find((n) => !used.has(n));
-   const ph = { file: f, slot, url: URL.createObjectURL(f), draft: null, p: Promise.resolve(false) };
+   // Resized to ≤ 2000 px WebP in the browser; the original only if the browser can't decode it.
+   const ready = media().then((m) => m.toWebp(f)).then((b) => b || f).catch(() => f);
+   const ph = { file: f, ready, slot, url: URL.createObjectURL(f), draft: null, p: Promise.resolve(false) };
    const li = document.createElement("li"); li.className = "photo"; li.dataset.slot = String(slot);
    const img = document.createElement("img"); img.src = ph.url; img.alt = "Foto " + (photos.length + 1);
    const rm = document.createElement("button"); rm.type = "button"; rm.setAttribute("aria-label", "Remover foto"); rm.innerHTML = icons.x;
@@ -452,8 +499,12 @@ ${anonVoice ? `  <div class="panel anon">
  $("photo-add").addEventListener("click", () => $("photo-file").click());
  $("photo-file").addEventListener("change", addPhotos);
 
- // ---- Anonimizar voz (audio only): hides the name field; the name is never sent while it is on.
- if ($("anon")) $("anon").addEventListener("click", () => { const on = $("anon").getAttribute("aria-checked") !== "true"; $("anon").setAttribute("aria-checked", String(on)); $("form").dataset.anon = String(on); });
+ // ---- Anonimizar voz (audio only): hides the name field (never sent while on) and replaces the uploaded audio with
+ // the distorted one in the same draft; off again puts the original back.
+ $("anon").addEventListener("click", () => {
+  const on = $("anon").getAttribute("aria-checked") !== "true"; $("anon").setAttribute("aria-checked", String(on)); $("form").dataset.anon = String(on);
+  if (main.dataset.media === "audio" && last && last.kind === "audio") upload(last.blob, "audio", last.dur, true);
+ });
  $("consent").addEventListener("change", canSend);
 
  // ---- Send: wait for the media and the photos, then ask the Worker to check and keep them.
@@ -463,11 +514,13 @@ ${anonVoice ? `  <div class="panel anon">
   $("send-error").classList.remove("show"); lock(true); $("send").textContent = "Enviando…";
   const done = () => { $("send").textContent = "Enviar"; lock(false); };
   try {
-   if (up.dataset.state === "error" && last) upload(last.blob, last.kind, last.dur);
+   if (up.dataset.state === "error" && last) upload(last.blob, last.kind, last.dur, true);
    if (!(await uploadPhotosAndMedia())) return;
-   const anonymous = main.dataset.media === "audio" && $("form").dataset.anon === "true";
+   const anonymous = main.dataset.media === "audio" && anonOn();
+   // Never send as anonymous a voice that went up undistorted.
+   if (anonymous && up.dataset.anon !== "true") return sendError("Não foi possível carregar o arquivo. Tente de novo.");
    const r = await fetch("/api/drafts/" + draft + "/send", { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ consent: true, anonymous, name: anonymous ? "" : $("name").value, photos: photos.map((x) => x.slot) }) });
+    body: JSON.stringify({ consent: true, anonymous, track, name: anonymous ? "" : $("name").value, photos: photos.map((x) => x.slot) }) });
    if (r.status === 422) { discard(); fail("Este arquivo não é um áudio ou vídeo válido. Escolha outro."); return; }
    if (!r.ok) return sendError("Não foi possível enviar. Tente de novo.");
    thanks((await r.json()).name);
@@ -490,7 +543,7 @@ ${anonVoice ? `  <div class="panel anon">
  };
  $("send").addEventListener("click", doSend);
  $("again").addEventListener("click", () => location.reload());
- $("up-retry").addEventListener("click", () => last && upload(last.blob, last.kind, last.dur));
+ $("up-retry").addEventListener("click", () => last && upload(last.blob, last.kind, last.dur, true));
 
  rec.addEventListener("click", () => { if (rec.dataset.kind === "audio") start(); });
  $("stop").addEventListener("click", stop);

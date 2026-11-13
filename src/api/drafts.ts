@@ -1,6 +1,7 @@
 // Drafts (ADR 0002): as soon as there is media, the browser asks for a draft and uploads straight to R2 `incoming/<id>/`.
 // POST /api/drafts checks Turnstile and a per-IP rate limit, inserts the submission as `uploading` and returns
-// short-lived signed URLs. Locally (no S3 secrets, DEV_OPEN on localhost) the upload goes through a Worker route instead.
+// short-lived signed URLs. POST /api/drafts/:id/photos and /files add photos, the audio track of a video, or replace
+// the media (distorted voice). Locally (no S3 secrets, DEV_OPEN on localhost) the upload goes through a Worker route instead.
 import type { Hono } from "hono";
 import type { Env } from "../index";
 import { createMultipart, multipartUrls, presign, type S3 } from "./s3";
@@ -10,7 +11,8 @@ export const PART_SIZE = 10 * 1024 * 1024;     // multipart above 10 MB, in 10 M
 export const MAX_BYTES = 300 * 1024 * 1024;    // browsers without WebCodecs upload the original, up to 300 MB
 export const RATE_LIMIT = 5;                   // drafts per IP per minute
 export const MAX_PHOTOS = 10;                  // photos per message
-export const MAX_PHOTO_BYTES = 20 * 1024 * 1024; // one photo, as picked (compression to WebP comes later)
+export const MAX_PHOTO_BYTES = 20 * 1024 * 1024; // one photo (the browser sends ≤ 2000 px WebP; the original only if it can't decode it)
+export const MAX_TRACK_BYTES = 20 * 1024 * 1024; // the audio track of a video (ADR 0003), ~1.5 MB for 90 s of Opus
 const BUCKET = "coffee-time-media";            // same bucket as the MEDIA binding in wrangler.jsonc
 
 // Cloudflare's documented Turnstile test secrets (always pass / always fail / token already spent).
@@ -44,6 +46,19 @@ const s3Of = (env: Env): S3 | null =>
 const ipHash = async (ip: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("coffee-time:" + ip)))].slice(0, 16).map((b) => b.toString(16).padStart(2, "0")).join("");
 
+// Where the browser PUTs `incoming/<id>/<file>`: one signed URL, signed multipart URLs above 10 MB, or the local route.
+const uploadFor = async (s3: S3 | null, id: string, file: string, type: string, size: number): Promise<Record<string, unknown>> => {
+  const path = `/${BUCKET}/incoming/${id}/${file}`;
+  if (!s3) return { mode: "local", url: `/api/drafts/${id}/${file}` };
+  if (size > PART_SIZE) {
+    const parts = Math.ceil(size / PART_SIZE), uploadId = await createMultipart(s3, path, type);
+    return { mode: "multipart", part_size: PART_SIZE, ...(await multipartUrls(s3, path, uploadId, parts, URL_TTL)) };
+  }
+  return { mode: "single", url: await presign(s3, "PUT", path, { expires: URL_TTL }) };
+};
+const openDraft = (db: D1Database, id: string) =>
+  db.prepare("SELECT id, kind FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', '-24 hours')").bind(id).first<{ id: string; kind: string }>();
+
 export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
   app.post("/api/drafts", async (c) => {
     const b = await c.req.json<any>().catch(() => null);
@@ -65,13 +80,8 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
 
     const s3 = s3Of(c.env);
     if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
-    const id = crypto.randomUUID(), key = `incoming/${id}/media`, path = `/${BUCKET}/${key}`;
-    let upload: Record<string, unknown>;
-    if (!s3) upload = { mode: "local", url: `/api/drafts/${id}/media` };
-    else if (size > PART_SIZE) {
-      const parts = Math.ceil(size / PART_SIZE), uploadId = await createMultipart(s3, path, type);
-      upload = { mode: "multipart", part_size: PART_SIZE, ...(await multipartUrls(s3, path, uploadId, parts, URL_TTL)) };
-    } else upload = { mode: "single", url: await presign(s3, "PUT", path, { expires: URL_TTL }) };
+    const id = crypto.randomUUID(), key = `incoming/${id}/media`;
+    const upload = await uploadFor(s3, id, "media", type, size);
 
     await db.prepare("INSERT INTO submissions (id, status, kind, duration_s, media_key) VALUES (?, 'uploading', ?, ?, ?)")
       .bind(id, kind, Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null, key).run();
@@ -86,8 +96,7 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
     if (!Number.isInteger(n) || n < 1 || n > MAX_PHOTOS || !type.startsWith("image/") || type.length > 100 || !Number.isInteger(size) || size < 1 || size > MAX_PHOTO_BYTES)
       return c.json({ error: "invalid photo" }, 400);
     const id = c.req.param("id");
-    const row = await c.env.DB.prepare("SELECT id FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', '-24 hours')").bind(id).first();
-    if (!row) return c.json({ error: "not found" }, 404);
+    if (!(await openDraft(c.env.DB, id))) return c.json({ error: "not found" }, 404);
     const s3 = s3Of(c.env), dev = isLocalDev(c.env, c.req.url);
     if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
     const key = `incoming/${id}/photo-${n}`;
@@ -95,16 +104,32 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
     return c.json({ key, expires_in: URL_TTL, upload }, 201);
   });
 
-  // Local dev only: stands in for the signed URLs when the S3 secrets are absent. Never active in production.
-  // The media must arrive within 15 min of the draft (like its signed URL); photos while the draft is open.
-  app.put("/api/drafts/:id/:file{media|photo-(?:[1-9]|10)}", async (c) => {
-    if (s3Of(c.env) || !isLocalDev(c.env, c.req.url)) return c.json({ error: "not found" }, 404);
-    const id = c.req.param("id"), file = c.req.param("file"), photo = file !== "media";
-    const row = await c.env.DB.prepare(`SELECT id FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', ?)`)
-      .bind(id, photo ? "-24 hours" : "-15 minutes").first();
+  // More files for an open draft (ADR 0003), same rules as the first upload:
+  // - `media` again: the browser replaces the file in place, e.g. with the distorted voice once "Anonimizar voz" is on,
+  //   so the original is overwritten in incoming/ and never reaches media/ (R2 keeps no old versions).
+  // - `audio`: the audio track of a video, extracted in the browser for the transcription.
+  app.post("/api/drafts/:id/files", async (c) => {
+    const b = await c.req.json<any>().catch(() => null);
+    const file = b?.file, type = String(b?.type || ""), size = b?.size;
+    if ((file !== "media" && file !== "audio") || type.length > 100 || !Number.isInteger(size) || size < 1) return c.json({ error: "invalid file" }, 400);
+    const id = c.req.param("id"), row = await openDraft(c.env.DB, id);
     if (!row) return c.json({ error: "not found" }, 404);
+    const ok = file === "media" ? type.startsWith(row.kind + "/") && size <= MAX_BYTES : row.kind === "video" && type.startsWith("audio/") && size <= MAX_TRACK_BYTES;
+    if (!ok) return c.json({ error: "invalid file" }, 400);
+    const s3 = s3Of(c.env), dev = isLocalDev(c.env, c.req.url);
+    if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
+    return c.json({ key: `incoming/${id}/${file}`, expires_in: URL_TTL, upload: await uploadFor(s3, id, file, type, size) }, 201);
+  });
+
+  // Local dev only: stands in for the signed URLs when the S3 secrets are absent. Never active in production.
+  // Files arrive while the draft is open (24 h): in production each one needs a fresh signed URL from the routes above.
+  app.put("/api/drafts/:id/:file{media|audio|photo-(?:[1-9]|10)}", async (c) => {
+    if (s3Of(c.env) || !isLocalDev(c.env, c.req.url)) return c.json({ error: "not found" }, 404);
+    const id = c.req.param("id"), file = c.req.param("file");
+    if (!(await openDraft(c.env.DB, id))) return c.json({ error: "not found" }, 404);
+    const max = file === "media" ? MAX_BYTES : file === "audio" ? MAX_TRACK_BYTES : MAX_PHOTO_BYTES;
     const body = await c.req.arrayBuffer();
-    if (!body.byteLength || body.byteLength > (photo ? MAX_PHOTO_BYTES : MAX_BYTES)) return c.json({ error: "invalid size" }, 400);
+    if (!body.byteLength || body.byteLength > max) return c.json({ error: "invalid size" }, 400);
     await c.env.MEDIA.put(`incoming/${id}/${file}`, body, { httpMetadata: { contentType: c.req.header("content-type") || "application/octet-stream" } });
     return c.body(null, 200);
   });

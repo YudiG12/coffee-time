@@ -1,10 +1,10 @@
 // Send (ADR 0002): POST /api/drafts/:id/send turns an `uploading` draft into a message.
 // For every file in `incoming/<id>/` it checks the size (HEAD) and the real type (magic bytes of the first 4 KB),
-// then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
+// (media, the audio track of a video when the browser sent one, photos), then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
 // A file that fails the check deletes the draft's files and marks it `rejected`. A file not uploaded yet → 409.
 import type { Hono } from "hono";
 import type { Env } from "../index";
-import { MAX_BYTES, MAX_PHOTOS, MAX_PHOTO_BYTES } from "./drafts";
+import { MAX_BYTES, MAX_PHOTOS, MAX_PHOTO_BYTES, MAX_TRACK_BYTES } from "./drafts";
 import { sniff } from "./sniff";
 
 export const MAX_NAME = 60;
@@ -54,8 +54,11 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     const anonymous = draft.kind === "audio" && b.anonymous === true;
     const name = anonymous ? null : String(b.name || "").replace(/\s+/g, " ").trim().slice(0, MAX_NAME) || null;
 
+    // `track: true`: the browser uploaded the audio track of the video (ADR 0003) and it must be there too.
+    const track = draft.kind === "video" && b.track === true;
     const files: File[] = [
       { from: draft.media_key, to: `media/${id}/media`, kind: draft.kind, max: MAX_BYTES },
+      ...(track ? [{ from: `incoming/${id}/audio`, to: `media/${id}/audio`, kind: "audio" as const, max: MAX_TRACK_BYTES }] : []),
       ...(photos as number[]).sort((x, y) => x - y).map((n) => ({ from: `incoming/${id}/photo-${n}`, to: `media/${id}/photo-${n}`, kind: "photo" as const, max: MAX_PHOTO_BYTES })),
     ];
     const heads = await Promise.all(files.map((f) => head(bucket, f.from)));
@@ -69,8 +72,9 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
 
     try { for (const f of files) await copy(bucket, f.from, f.to); }
     catch { return c.json({ error: "storage" }, 503); } // nothing committed: the browser can send again
-    const r = await db.prepare("UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, photo_keys = ? WHERE id = ? AND status = 'uploading'")
-      .bind(name, anonymous ? 1 : 0, files[0].to, JSON.stringify(files.slice(1).map((f) => f.to)), id).run();
+    const photoKeys = files.filter((f) => f.kind === "photo").map((f) => f.to);
+    const r = await db.prepare("UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ? WHERE id = ? AND status = 'uploading'")
+      .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, JSON.stringify(photoKeys), id).run();
     if (!r.meta.changes) return c.json({ error: "not found" }, 404);
     // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
     // incoming/, never a broken message.
