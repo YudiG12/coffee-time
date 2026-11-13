@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-13 · **Notice that the first vlog episode isn't out yet** ([#40](https://github.com/YudiG12/coffee-time/pull/40) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-40))
 - 2026-11-13 · **Show the video's first frame in the start page preview** ([#35](https://github.com/YudiG12/coffee-time/pull/35) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-35))
 - 2026-11-13 · **Record video in the browser** ([#27](https://github.com/YudiG12/coffee-time/pull/27) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-27))
 - 2026-11-13 · 🔒 **Keep the R2 CORS rule in the repo and apply it on every deploy** ([#26](https://github.com/YudiG12/coffee-time/pull/26) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-26))
