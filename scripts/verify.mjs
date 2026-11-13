@@ -277,6 +277,18 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     assert(eq(t.cleanTags({ type: "Sugestão", topics: ["x".repeat(40)] }), ["Sugestão", "x".repeat(30)]), "one long word");
     assert(t.MAX_TAG === 30 && t.WHISPER.includes("whisper"), "constants");
   });
+  await check("api: a job that arrives before Send commits is retried, not dropped; the dead-letter queue never marks a draft", async () => {
+    let row = { status: "uploading", kind: "audio", media_key: "media/j1/media", audio_key: null, transcript: null }, updates = [];
+    const DB = { prepare: (sql) => ({ bind: (...a) => ({ first: async () => (a[0] === "j1" ? row : null), run: async () => { updates.push(sql); return { meta: { changes: 1 } }; } }) }) };
+    const out = []; const msg = (id) => ({ body: { id }, attempts: 1, ack: () => out.push("ack"), retry: (o) => out.push(`retry ${o?.delaySeconds}`) });
+    const env = { DB, JOBS_RETRY_BASE_S: "0", MEDIA: { get: async () => null }, AI: { run: async () => { throw new Error("no AI here"); } } };
+    await t.queue({ queue: t.JOBS_QUEUE, messages: [msg("j1")] }, env);
+    assert(out.join() === "retry 0" && updates.length === 0, `uploading row → ${out.join()} ${updates.join()}`);
+    out.length = 0; await t.queue({ queue: t.JOBS_QUEUE, messages: [msg("gone")] }, env);
+    assert(out.join() === "ack", `deleted row → ${out.join()}`);
+    out.length = 0; await t.queue({ queue: t.DLQ, messages: [msg("j1")] }, env);
+    assert(out.join() === "ack" && /status != 'uploading'/.test(updates[0]), `dead-letter update: ${updates[0]}`);
+  });
 }
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
@@ -300,7 +312,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway (originals kept until committed, retry works)", async () => {
+  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits)", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -328,10 +340,13 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     const retry = await send();
     assert(retry.status === 200 && row.status === "new" && row.media_key === "media/d1/media", `retry → ${retry.status}, status ${row.status}`);
     assert(jobs.length === 1 && jobs[0].id === "d1", `jobs after send: ${JSON.stringify(jobs)}`);
-    // A queue outage after the commit never loses the message.
+    // A queue outage never loses the job: Send answers 503 with nothing committed, and a retry enqueues and commits.
     Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" }); for (const k of ["media", "photo-1", "photo-2"]) store.set(`incoming/d1/${k}`, store.get(`media/d1/${k}`));
-    JOBS.send = async () => { throw new Error("queue down"); };
-    const down = await send(); assert(down.status === 200 && row.status === "new", `send with the queue down → ${down.status}`);
+    const realSend = JOBS.send; JOBS.send = async () => { throw new Error("queue down"); };
+    const down = await send(); assert(down.status === 503 && row.status === "uploading", `send with the queue down → ${down.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`incoming/d1/${k}`)), "queue error deleted the originals");
+    JOBS.send = realSend; const back = await send();
+    assert(back.status === 200 && row.status === "new" && jobs.length === 2, `retry after the queue is back → ${back.status}, status ${row.status}, jobs ${jobs.length}`);
     assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {

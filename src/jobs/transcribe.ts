@@ -42,9 +42,11 @@ export const cleanTags = (out: unknown): string[] => {
 };
 
 export const transcribe = async (env: Env, id: string) => {
-  const row = await env.DB.prepare("SELECT kind, media_key, audio_key, transcript FROM submissions WHERE id = ? AND status NOT IN ('uploading','rejected')")
-    .bind(id).first<{ kind: string; media_key: string | null; audio_key: string | null; transcript: string | null }>();
-  if (!row || row.transcript != null) return; // deleted, or already done (a queue may deliver twice)
+  const row = await env.DB.prepare("SELECT status, kind, media_key, audio_key, transcript FROM submissions WHERE id = ?")
+    .bind(id).first<{ status: string; kind: string; media_key: string | null; audio_key: string | null; transcript: string | null }>();
+  if (!row || row.status === "rejected" || row.transcript != null) return; // deleted, rejected, or already done (a queue may deliver twice)
+  // Send enqueues just before it commits: retry until it has (a Send that never commits ends in the dead-letter queue).
+  if (row.status === "uploading") throw new Error("not sent yet");
   // Audio: the message itself. Video: its audio track from the browser (ADR 0003), else the video file.
   const key = row.audio_key || row.media_key;
   const obj = key ? await env.MEDIA.get(key) : null;
@@ -78,7 +80,7 @@ export const queue = async (batch: MessageBatch<Job>, env: Env) => {
     if (!id) { msg.ack(); continue; }
     if (batch.queue === DLQ) {
       // Gave up: keep the message, note the failure so the panel stops saying "Transcrevendo…".
-      await env.DB.prepare("UPDATE submissions SET transcript_error = datetime('now') WHERE id = ? AND transcript IS NULL").bind(id).run();
+      await env.DB.prepare("UPDATE submissions SET transcript_error = datetime('now') WHERE id = ? AND transcript IS NULL AND status != 'uploading'").bind(id).run();
       msg.ack(); continue;
     }
     try { await transcribe(env, id); msg.ack(); }

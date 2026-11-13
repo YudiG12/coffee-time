@@ -1,7 +1,7 @@
 // Send (ADR 0002): POST /api/drafts/:id/send turns an `uploading` draft into a message.
 // For every file in `incoming/<id>/` it checks the size (HEAD) and the real type (magic bytes of the first 4 KB),
 // (media, the audio track of a video when the browser sent one, photos), then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
-// Once committed it enqueues the transcript job on JOBS.
+// It enqueues the transcript job on JOBS just before committing (a queue error → 503, nothing committed).
 // A file that fails the check deletes the draft's files and marks it `rejected`. A file not uploaded yet → 409.
 import type { Hono } from "hono";
 import type { Env } from "../index";
@@ -73,6 +73,10 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
 
     try { for (const f of files) await copy(bucket, f.from, f.to); }
     catch { return c.json({ error: "storage" }, 503); } // nothing committed: the browser can send again
+    // Transcript and tags in the background (ADR 0004). Enqueued before the commit so a queue outage can't lose
+    // the job: Send answers 503 and stays retryable. A job that arrives before the commit is retried by the consumer.
+    try { await c.env.JOBS.send({ id }); }
+    catch (e) { console.log(`enqueue ${id} failed: ${(e as Error)?.message || e}`); return c.json({ error: "queue" }, 503); }
     const photoKeys = files.filter((f) => f.kind === "photo").map((f) => f.to);
     const r = await db.prepare("UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ? WHERE id = ? AND status = 'uploading'")
       .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, JSON.stringify(photoKeys), id).run();
@@ -80,9 +84,6 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
     // incoming/, never a broken message.
     await deleteIncoming(bucket, id).catch(() => {});
-    // Transcript and tags in the background (ADR 0004). If enqueueing fails the message is still saved and shows
-    // "Transcrevendo…" until a later job picks it up.
-    await c.env.JOBS.send({ id }).catch((e) => console.log(`enqueue ${id} failed: ${e?.message || e}`));
     return c.json({ id, status: "new", name }, 200);
   });
 };
