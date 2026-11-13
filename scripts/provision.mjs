@@ -27,7 +27,17 @@ if (process.argv.includes("--check")) {
   process.exit(problems.length ? 1 : 0);
 }
 
-const sh = (args) => { try { execFileSync("npx", ["wrangler", ...args], { stdio: "pipe" }); return true; } catch { return false; } };
+// Keeps wrangler's own error text: deploy.yml reads it to tell a credential failure (owner) from a code one (builder).
+let lastError = "";
+const sh = (args) => {
+  try { execFileSync("npx", ["wrangler", ...args], { stdio: "pipe" }); return true; }
+  catch (e) {
+    lastError = `${e.stdout || ""}\n${e.stderr || ""}`.split("\n").filter((l) => /\[code: \d+\]|error|denied|unauthori[sz]ed|forbidden|permission/i.test(l)).slice(0, 6).join("\n");
+    // A stable marker deploy.yml looks for: the owner must fix the token, the builder can't
+    if (/\[code: (6111|9106|9109|10000|10001)\]|authentication error|unauthori[sz]ed|forbidden|\b40[13]\b/i.test(lastError)) lastError += "\nCREDENTIAL FAILURE: the Cloudflare token is invalid or lacks a permission";
+    return false;
+  }
+};
 const queues = new Set([
   ...(cfg.queues?.producers ?? []).map((q) => q.queue),
   ...(cfg.queues?.consumers ?? []).flatMap((q) => [q.queue, q.dead_letter_queue]),
@@ -35,10 +45,10 @@ const queues = new Set([
 for (const q of queues) {
   if (sh(["queues", "info", q])) console.log(`queue ${q}: ok`);
   else if (sh(["queues", "create", q])) console.log(`queue ${q}: created`);
-  else { console.error(`queue ${q}: missing and could not be created (token needs Queues Write)`); process.exitCode = 1; }
+  else { console.error(`queue ${q}: missing and could not be created (token needs Queues Write)\n${lastError}`); process.exitCode = 1; }
 }
 for (const b of (cfg.r2_buckets ?? []).map((b) => b.bucket_name)) {
   if (sh(["r2", "bucket", "info", b])) console.log(`bucket ${b}: ok`);
   else if (sh(["r2", "bucket", "create", b])) console.log(`bucket ${b}: created`);
-  else { console.error(`bucket ${b}: missing and could not be created`); process.exitCode = 1; }
+  else { console.error(`bucket ${b}: missing and could not be created (token needs R2 Write)\n${lastError}`); process.exitCode = 1; }
 }

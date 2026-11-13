@@ -74,7 +74,7 @@ jobs:
         run: |
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           owner="${GITHUB_REPOSITORY%%/*}"
-          if grep -qiE 'authentication error|code: 10000|invalid api token|token.*expired|\b(401|403)\b' run.log 2>/dev/null; then
+          if grep -qiE 'CREDENTIAL FAILURE|authentication error|\[code: (6111|9106|9109|10000|10001)\]|invalid api token|token.*expired|\b(401|403)\b' run.log 2>/dev/null; then
             labels=(--label deploy-failed --label needs-owner); who="@$owner: this needs you — Cloudflare rejected the credentials (expired/revoked token or missing permission). Renew \`CLOUDFLARE_API_TOKEN\` (\`cf-token-for-repo\`) and re-run the deploy."
           else
             labels=(--label agent --label deploy-failed); who="Builder: read the failed step (\`gh run view --log-failed\`), fix the cause in the repo and make the deploy green."
