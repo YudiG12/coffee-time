@@ -186,6 +186,26 @@ await check("ui: recording stops by itself at the limit (dev-only ?max=3)", asyn
   assert((await p.locator("#ready-bar").evaluate((e) => e.style.width)) === "100%", "bar not full at the limit");
   await ctx.close();
 });
+// Double click while the microphone prompt is open must start one recorder only, and Stop must release the mic.
+await check("ui: double click on record starts one recording and stop releases the microphone", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["microphone"] }); await offline(ctx);
+  await ctx.addInitScript(() => {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.__calls = 0; window.__streams = [];
+    navigator.mediaDevices.getUserMedia = async (c) => { window.__calls++; await new Promise((r) => setTimeout(r, 800)); const s = await gum(c); window.__streams.push(s); return s; };
+  });
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.evaluate(() => { const b = document.getElementById("record"); b.click(); b.click(); b.click(); });
+  await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(1200); await p.click("#stop");
+  await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(300);
+  const r = await p.evaluate(() => ({ calls: window.__calls, live: window.__streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length }));
+  assert(r.calls === 1, `getUserMedia called ${r.calls} times`);
+  assert(r.live === 0, `${r.live} microphone track(s) still live after stop`);
+  await ctx.close();
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");

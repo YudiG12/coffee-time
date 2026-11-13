@@ -136,7 +136,9 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
  const $ = (id) => document.getElementById(id);
  const main = document.querySelector(".start"), tabs = document.querySelectorAll(".tab"), rec = $("record"), err = $("rec-error"), player = $("player");
  const fmt = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
- let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "";
+ let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "", busy = false;
+ // One recording at a time: lock the start controls while the microphone prompt is open.
+ const lock = (on) => { busy = on; rec.disabled = on; $("redo").disabled = on; };
  const setState = (s) => { main.dataset.state = s; tabs.forEach((t) => (t.disabled = s === "recording")); };
  const discard = () => { player.pause(); if (url) URL.revokeObjectURL(url); url = ""; $("ready").removeAttribute("data-duration"); setState("idle"); };
 
@@ -151,12 +153,13 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 
  const elapsed = () => Math.min((performance.now() - started) / 1000, MAX);
  const start = async () => {
-  err.classList.remove("show");
+  if (busy || (recorder && recorder.state !== "inactive")) return;
+  lock(true); err.classList.remove("show");
   try {
    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch {
    err.textContent = "Não foi possível usar o microfone. Verifique a permissão do navegador.";
-   err.classList.add("show"); setState("idle"); return;
+   err.classList.add("show"); setState("idle"); lock(false); return;
   }
   const type = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m));
   recorder = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined);
@@ -171,7 +174,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
    Object.assign($("ready").dataset, { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type });
    setState("ready");
   };
-  recorder.start(250);
+  recorder.start(250); lock(false);
   started = performance.now(); $("timer").textContent = "0:00"; setState("recording");
   tick = setInterval(() => { const s = elapsed(); $("timer").textContent = fmt(s); if (s >= MAX) stop(); }, 100);
  };
