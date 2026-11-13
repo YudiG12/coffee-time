@@ -715,6 +715,89 @@ await check("ui: double click on record starts one recording, tabs lock, stop re
   assert(d > 2.5 && d < 4.5, `duration after the microphone ended: ${d}`);
   await ctx.close();
 });
+// Video recording on the Vídeo tab, with Chromium's fake camera + microphone: live preview while recording, Stop,
+// "Vídeo pronto" with Regravar, background upload; then the time limit and a denied camera.
+await check("ui: record video with a fake camera: live preview, stop, Vídeo pronto, upload, Regravar (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    const ctx = await browser.newContext({ viewport: vp, permissions: ["microphone", "camera"] }); await offline(ctx);
+    await ctx.addInitScript(() => {
+      const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      window.__streams = []; window.__asked = [];
+      navigator.mediaDevices.getUserMedia = async (c) => { window.__asked.push(c); const s = await gum(c); window.__streams.push(s); return s; };
+    });
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    await p.click("#tab-video"); await p.click("#record");
+    await p.locator("#recorder[data-kind=video]").waitFor({ state: "visible", timeout: 5000 });
+    const asked = await p.evaluate(() => window.__asked[0]);
+    assert(asked && asked.audio && asked.video, `${name}: did not ask for camera + microphone: ${JSON.stringify(asked)}`);
+    assert(await p.locator("#cam").isVisible() && !(await p.locator(".rec-mic").isVisible()), `${name}: no live preview (or the mic icon is shown)`);
+    await p.waitForFunction(() => { const v = document.getElementById("cam"); return v.srcObject && v.videoWidth > 0 && !v.paused; }, null, { timeout: 5000 });
+    assert(await p.locator("#tab-audio").isDisabled(), `${name}: tabs not locked while recording video`);
+    const t = await p.locator("body").innerText();
+    assert(t.includes("máximo de 90 segundos") && !/\p{Extended_Pictographic}/u.test(t), `${name}: recording text`);
+    await p.waitForTimeout(3000);
+    const timer = (await p.locator("#timer").innerText()).trim();
+    assert(/^0:0[2-4]$/.test(timer), `${name}: timer shows ${timer} after ~3 s`);
+    await p.screenshot({ path: `${OUT}/record-video-${name}.png`, fullPage: true });
+    await p.click("#stop");
+    await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+    const v = (await p.locator("#vready").innerText()).replace(/\s+/g, " ");
+    assert(/Vídeo pronto · \d+p/.test(v) && v.includes("Regravar"), `${name}: video ready text: ${v}`);
+    const d = await p.evaluate(() => ({ ...document.getElementById("vready").dataset }));
+    assert(d.source === "record" && Number(d.duration) > 2.5 && Number(d.duration) < 5, `${name}: video duration ${d.duration} (${d.source})`);
+    assert(Number(d.bytes) > 1000 && /^video\//.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
+    assert((await p.locator("#vdur").innerText()).trim() === "0:03", `${name}: video length ${await p.locator("#vdur").innerText()}`);
+    assert(!(await p.locator("#ready").isVisible()) && (await p.getAttribute("main", "data-media")) === "video", `${name}: not in the video ready state`);
+    const live = await p.evaluate(() => window.__streams.flatMap((s) => s.getTracks()).filter((x) => x.readyState === "live").length);
+    assert(live === 0, `${name}: ${live} camera/microphone track(s) still live after stop`);
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 30000 });
+    const id = await p.getAttribute("#up", "data-draft");
+    assert(r2get(`incoming/${id}/media`).length > 1000, `${name}: recorded video not uploaded`);
+    await p.waitForTimeout(300);
+    await p.screenshot({ path: `${OUT}/record-video-ready-${name}.png`, fullPage: true });
+    await p.click("#vplay"); await p.waitForTimeout(600);
+    assert(await p.evaluate(() => { const x = document.getElementById("vplayer"); return !x.paused && x.currentTime > 0; }), `${name}: recorded video does not play`);
+    await p.click("#vplayer");
+    // Regravar: a new take replaces the old one.
+    await p.click("#vswap");
+    await p.locator("#recorder[data-kind=video]").waitFor({ state: "visible", timeout: 5000 });
+    await p.waitForTimeout(1200); await p.click("#stop");
+    await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+    assert(Number(await p.getAttribute("#vready", "data-duration")) < 2.5, `${name}: Regravar kept the old take`);
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 30000 });
+    assert((await p.getAttribute("#up", "data-draft")) !== id, `${name}: Regravar did not upload the new take`);
+    await ctx.close();
+  }
+});
+await check("ui: video recording stops by itself at the limit (dev-only ?max=3)", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["microphone", "camera"] }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/?max=3", { waitUntil: "networkidle" });
+  await p.click("#tab-video"); await p.click("#record");
+  await p.locator("#recorder[data-kind=video]").waitFor({ state: "visible", timeout: 5000 });
+  await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 7000 }); // no click on stop
+  const d = Number(await p.getAttribute("#vready", "data-duration"));
+  assert(Math.abs(d - 3) < 0.3, `auto-stop duration ${d}`);
+  await ctx.close();
+});
+await check("ui: camera denied shows a message in Portuguese and goes back to idle", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  await ctx.addInitScript(() => {
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (c) => { if (c && c.video) throw new DOMException("Permission denied", "NotAllowedError"); return gum(c); };
+  });
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.click("#tab-video"); await p.click("#record");
+  await p.locator("#rec-error.show").waitFor({ state: "visible", timeout: 5000 });
+  const msg = (await p.locator("#rec-error").innerText()).trim();
+  assert(msg === "Não foi possível usar a câmera. Verifique a permissão do navegador.", `message "${msg}"`);
+  assert((await p.getAttribute("main", "data-state")) === "idle" && (await p.locator("#record").isVisible()) && !(await p.locator("#record").isDisabled()), "not back to idle");
+  assert(!(await p.locator("#tab-audio").isDisabled()), "tabs still locked");
+  await p.screenshot({ path: `${OUT}/record-video-denied-mobile.png`, fullPage: true });
+  await ctx.close();
+});
 // "Envie um arquivo": a WAV generated here and WebM fixtures in scripts/fixtures/ (made with ffmpeg, see README there).
 const FX = {
   audio: { name: "mensagem.wav", mimeType: "audio/wav", buffer: wav(3) },

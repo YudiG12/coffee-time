@@ -46,6 +46,8 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // anonymous audio is distorted, a video is re-encoded to 1080p ~5 Mbps with its audio track uploaded alongside, and
 // photos become ≤ 2000 px WebP. Turning "Anonimizar voz" on (or off) replaces the file in the same draft.
 // Without WebCodecs a video goes up as picked, with a short warning.
+// Video recording (Vídeo tab): camera + microphone with a live preview above the timer (same 90 s limit and Stop as audio),
+// then the same "Vídeo pronto" state as a picked video, with "Regravar", and the same background upload.
 export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<style>
 .start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
 .hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
@@ -76,6 +78,11 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 .rec-mic span{width:52px;height:52px;border-radius:50%;background:rgba(217,123,108,.3);color:var(--rec);display:flex;align-items:center;justify-content:center}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(217,123,108,.25)}50%{box-shadow:0 0 0 12px rgba(217,123,108,0)}}
 @media (prefers-reduced-motion:reduce){.rec-mic{animation:none}}
+.cam{display:none;position:relative;width:100%;aspect-ratio:16/9;border-radius:4px;overflow:hidden;background:#1C1611}
+.cam video{width:100%;height:100%;object-fit:contain;display:block;transform:scaleX(-1)}
+.cam .dot{position:absolute;left:10px;top:10px;display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:4px;background:rgba(23,18,14,.8);color:var(--rec);font:600 12px/1 Onest,system-ui,sans-serif}
+.cam .dot i{width:7px;height:7px;border-radius:50%;background:var(--rec)}
+.rec[data-kind="video"]{padding-top:12px}.rec[data-kind="video"] .cam{display:block}.rec[data-kind="video"] .rec-mic{display:none}.rec[data-kind="video"] .timer{margin-top:18px}
 .timer{font:500 56px/1 "JetBrains Mono",ui-monospace,monospace;letter-spacing:.04em;margin-top:22px;font-variant-numeric:tabular-nums}
 .rec .max{color:var(--subtle);font-size:13px;margin:8px 0 18px}
 .stop{width:72px;height:72px;border-radius:50%;border:3px solid var(--rec);background:transparent;color:var(--rec);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
@@ -175,7 +182,8 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  </div>
  <input type="file" id="file" accept="audio/*,video/*" hidden>
  <p class="rec-error" id="rec-error" role="alert"></p>
- <div class="panel rec" id="recorder" aria-live="polite">
+ <div class="panel rec" id="recorder" aria-live="polite" data-kind="audio">
+  <div class="cam"><video id="cam" muted playsinline aria-label="Prévia da câmera"></video><span class="dot" aria-hidden="true"><i></i>Gravando</span></div>
   <div class="rec-mic"><span>${icon(MIC, 24)}</span></div>
   <div class="timer" id="timer" role="timer">0:00</div>
   <div class="max">máximo de ${max} segundos</div>
@@ -272,31 +280,49 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  }));
 
  const elapsed = () => Math.min((performance.now() - started) / 1000, MAX);
- const start = async () => {
+ const cam = $("cam");
+ // kind: "audio" (microphone) or "video" (camera + microphone, live preview while recording).
+ const start = async (kind = "audio") => {
   if (busy || (recorder && recorder.state !== "inactive")) return;
   lock(true); err.classList.remove("show"); source = "record";
   $("ready-status").textContent = "Gravação pronta"; $("redo").textContent = "Regravar";
+  const video = kind === "video";
   try {
-   stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+   stream = await navigator.mediaDevices.getUserMedia(video ? { audio: true, video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" } } : { audio: true });
   } catch {
-   fail("Não foi possível usar o microfone. Verifique a permissão do navegador.");
+   fail(video ? "Não foi possível usar a câmera. Verifique a permissão do navegador." : "Não foi possível usar o microfone. Verifique a permissão do navegador.");
    setState("idle"); lock(false); return;
   }
-  const type = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m));
-  recorder = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined);
+  const types = video ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"] : ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
+  const type = types.find((m) => MediaRecorder.isTypeSupported(m));
+  const bits = video ? { videoBitsPerSecond: 5000000, audioBitsPerSecond: 128000 } : { audioBitsPerSecond: 64000 };
+  try { recorder = new MediaRecorder(stream, type ? { mimeType: type, ...bits } : undefined); }
+  catch { stream.getTracks().forEach((t) => t.stop()); fail("Seu navegador não consegue gravar aqui. Envie um arquivo."); setState("idle"); lock(false); return; }
+  const vt = stream.getVideoTracks()[0], height = (vt && vt.getSettings().height) || 0;
+  $("recorder").dataset.kind = kind;
+  if (video) { cam.srcObject = stream; cam.play().catch(() => {}); }
   chunks = [];
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  // Runs on Stop, on the time limit, and when the microphone goes away (device unplugged).
+  // Runs on Stop, on the time limit, and when the microphone or camera goes away (device unplugged).
   recorder.onstop = () => {
    clearInterval(tick); duration = elapsed();
-   stream.getTracks().forEach((t) => t.stop());
-   const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-   url = URL.createObjectURL(blob); player.src = url;
-   $("ready-time").textContent = fmt(Math.max(1, Math.round(duration)));
-   $("ready-bar").style.width = (duration / MAX) * 100 + "%";
-   Object.assign($("ready").dataset, { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type, source: "record" });
-   main.dataset.media = "audio"; setState("ready");
-   upload(blob, "audio", duration);
+   stream.getTracks().forEach((t) => t.stop()); cam.srcObject = null;
+   const blob = new Blob(chunks, { type: recorder.mimeType || (video ? "video/webm" : "audio/webm") });
+   url = URL.createObjectURL(blob);
+   const data = { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type, source: "record" };
+   if (video) {
+    vplayer.src = url;
+    $("vdur").textContent = fmt(Math.max(1, Math.round(duration)));
+    $("vstatus").textContent = "Vídeo pronto" + (height ? " · " + height + "p" : ""); $("vswap").textContent = "Regravar";
+    Object.assign($("vready").dataset, data, { height: String(height) });
+   } else {
+    player.src = url;
+    $("ready-time").textContent = fmt(Math.max(1, Math.round(duration)));
+    $("ready-bar").style.width = (duration / MAX) * 100 + "%";
+    Object.assign($("ready").dataset, data);
+   }
+   main.dataset.media = kind; setState("ready");
+   upload(blob, kind, duration);
   };
   recorder.start(250); lock(false);
   started = performance.now(); $("timer").textContent = "0:00"; setState("recording");
@@ -344,7 +370,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
   } else {
    vplayer.src = src;
    $("vdur").textContent = fmt(Math.max(1, Math.round(duration)));
-   $("vstatus").textContent = "Vídeo pronto" + (meta.height ? " · " + meta.height + "p" : "");
+   $("vstatus").textContent = "Vídeo pronto" + (meta.height ? " · " + meta.height + "p" : ""); $("vswap").textContent = "Trocar vídeo";
    Object.assign($("vready").dataset, data, { height: String(meta.height) });
   }
   main.dataset.media = kind; setState("ready");
@@ -545,12 +571,12 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  $("again").addEventListener("click", () => location.reload());
  $("up-retry").addEventListener("click", () => last && upload(last.blob, last.kind, last.dur, true));
 
- rec.addEventListener("click", () => { if (rec.dataset.kind === "audio") start(); });
+ rec.addEventListener("click", () => start(rec.dataset.kind));
  $("stop").addEventListener("click", stop);
  $("upload").addEventListener("click", () => file.click());
- $("vswap").addEventListener("click", () => file.click());
+ $("vswap").addEventListener("click", () => { if (source === "file") return file.click(); discard(); start("video"); });
  file.addEventListener("change", pick);
- $("redo").addEventListener("click", () => { if (source === "file") return file.click(); discard(); start(); });
+ $("redo").addEventListener("click", () => { if (source === "file") return file.click(); discard(); start("audio"); });
  const vtoggle = () => (vplayer.paused ? vplayer.play() : vplayer.pause());
  $("vplay").addEventListener("click", vtoggle); vplayer.addEventListener("click", vtoggle);
  vplayer.addEventListener("play", () => $("vframe").classList.add("playing"));
