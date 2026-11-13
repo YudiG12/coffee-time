@@ -28,6 +28,7 @@ sh("node scripts/build-site.mjs");
 console.log("migrate + seed (isolated local D1)…");
 sh(`npx wrangler d1 migrations apply coffee-time --local --persist-to ${STATE}`);
 sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --file scripts/demo-seed.sql`);
+sh(`npx wrangler r2 object put "coffee-time-media/media/demo-1/photo-1" --local --persist-to ${STATE} --file scripts/fixtures/demo-photo.png --content-type image/png`);
 
 // The Worker runs from a copy of wrangler.jsonc where Workers AI (remote only, needs an account) is replaced by a
 // service binding to scripts/fixtures/ai-stub.js, and queue retries are immediate (JOBS_RETRY_BASE_S=0).
@@ -870,6 +871,65 @@ await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
 });
+// docs/design/panel-list.png: photo or icon, name, transcript + tag pills, duration, date, status; "N envios novos";
+// filters by status tab, tag chip and search, each a link (?status=&tag=&q=).
+await check("ui: panel list as in the design: first photo or icon, columns, \"N envios novos\", filters by status, tag and text", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
+  p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  const ids = async () => p.locator("#submissions li").evaluateAll((els) => els.map((e) => e.dataset.id));
+  const all = (await api("/api/panel/submissions")).body, fresh = all.filter((x) => x.status === "new").length;
+  await p.goto(BASE + "/painel", { waitUntil: "networkidle" });
+  const head = await p.locator(".cols").innerText();
+  for (const c of ["QUEM", "O QUE FALOU", "DURAÇÃO", "QUANDO", "STATUS"]) assert(head.toUpperCase().includes(c), `column ${c} missing`);
+  assert((await p.locator("#fresh").innerText()) === `${fresh} ${fresh === 1 ? "envio novo" : "envios novos"}`, `fresh: ${await p.locator("#fresh").innerText()}`);
+  for (const [k, label, n] of [["new", "Novos", fresh], ["favorite", "Favoritos", all.filter((x) => x.status === "favorite").length], ["used", "Usados", all.filter((x) => x.status === "used").length]])
+    assert((await p.locator(`.tab[data-status=${k}]`).innerText()).replace(/\s+/g, " ") === `${label} ${n}`, `tab ${k}: ${await p.locator(`.tab[data-status=${k}]`).innerText()}`);
+  assert(await p.locator(".tab[data-status=all][aria-current]").count() === 1, "Todos is not the default");
+  // Photos: the first photo (served behind the panel guard, type from the bytes); no photos → the audio/video icon.
+  const marina = p.locator('li[data-id="demo-1"]');
+  await marina.scrollIntoViewIfNeeded();
+  assert(await marina.locator("img.thumb").evaluate((i) => (i.complete ? Promise.resolve() : new Promise((r) => { i.onload = i.onerror = r; })).then(() => i.naturalWidth === 256)), "demo-1: first photo not shown");
+  assert((await marina.innerText()).includes("áudio · 1 foto") && (await marina.innerText()).includes("1:12"), `demo-1 row: ${await marina.innerText()}`);
+  for (const [id, kind] of [["demo-2", "audio"], ["demo-3", "video"]]) {
+    const row = p.locator(`li[data-id="${id}"]`);
+    assert(await row.locator("img").count() === 0 && await row.locator(`.thumb.icon[data-kind=${kind}] svg`).count() === 1, `${id}: no ${kind} icon`);
+  }
+  assert((await p.locator('li[data-id="demo-2"]').innerText()).includes("voz distorcida") && (await p.locator('li[data-id="demo-2"]').innerText()).includes("ontem,"), "demo-2 subtitle or date");
+  if (sentId) {
+    const r = await fetch(`${BASE}/painel/foto/${sentId}`);
+    assert(r.status === 200 && r.headers.get("content-type") === "image/png" && Buffer.from(await r.arrayBuffer()).equals(PNG), `sent message photo → ${r.status} ${r.headers.get("content-type")}`);
+    assert(await p.locator(`li[data-id="${sentId}"] img.thumb`).count() === 1, "a sent message with photos shows no photo");
+  }
+  assert((await fetch(`${BASE}/painel/foto/demo-2`)).status === 404, "photo of a message without photos");
+  assert(!/\p{Extended_Pictographic}/u.test(await p.locator("body").innerText()), "emoji in the panel");
+  // Status tab
+  await p.click(".tab[data-status=favorite]"); await p.waitForLoadState("networkidle");
+  const fav = await ids(); assert(fav.length >= 1 && fav.every((id) => all.find((x) => x.id === id)?.status === "favorite") && fav.includes("demo-2"), `Favoritos: ${fav}`);
+  await p.click(".tab[data-status=all]"); await p.waitForLoadState("networkidle");
+  // Tag chip
+  await p.click('li[data-id="demo-1"] .pill >> text=Kafka'); await p.waitForLoadState("networkidle"); // a row's tag pill is a filter link
+  assert(JSON.stringify(await ids()) === '["demo-1"]', `tag Kafka: ${await ids()}`);
+  assert(await p.locator('.chip[data-tag="Kafka"][aria-current]').count() === 1, "active tag not marked");
+  await p.screenshot({ path: `${OUT}/panel-filter-tag.png`, fullPage: true });
+  await p.click('.chip[data-tag="Kafka"]'); await p.waitForLoadState("networkidle"); // a second click clears it
+  assert((await ids()).length === all.length, "tag not cleared");
+  // Search in transcripts, combined with a status
+  await p.fill('input[name="q"]', "Lisboa"); await p.press('input[name="q"]', "Enter"); await p.waitForLoadState("networkidle");
+  const lisboa = (await api("/api/panel/submissions?q=Lisboa")).body.map((x) => x.id), found = await ids();
+  assert(found.includes("demo-3") && !found.includes("demo-1") && JSON.stringify(found) === JSON.stringify(lisboa), `q=Lisboa: ${found}`);
+  await p.screenshot({ path: `${OUT}/panel-search.png`, fullPage: true });
+  await p.click(".tab[data-status=favorite]"); await p.waitForLoadState("networkidle");
+  assert((await ids()).length === 0 && (await p.locator(".empty").innerText()).includes("Nenhum envio"), "q + status should be empty");
+  assert(new URL(p.url()).searchParams.get("q") === "Lisboa", "status tab dropped the search");
+  await ctx.close();
+});
+await check("ui: panel at phone width has no horizontal scroll", async () => {
+  await shot("panel-mobile", "/painel", { width: 390, height: 844 });
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx); const p = await ctx.newPage();
+  await p.goto(BASE + "/painel", { waitUntil: "networkidle" });
+  const w = await p.evaluate(() => document.documentElement.scrollWidth); await ctx.close();
+  assert(w <= 390, `scrollWidth ${w}`);
+});
 await check("ui: panel says \"Transcrevendo…\" before the job runs, then the transcript and tags; dead-lettered or rejected says \"Sem transcrição\"", async () => {
   const id = await sendAudio(markedWav("SLOWJOB"), "Paula Teste");
   const t = await shot("panel-transcribing", "/painel", { width: 1440, height: 900 });
@@ -912,7 +972,7 @@ await browser.close();
   const post = (path, headers = {}) => fetch(B2 + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }).then((r) => r.status).catch(() => 0);
   await check("auth: the public page stays public", async () => { const st = await get("/"); assert(st === 200, `${st}`); });
   await check("auth: no credentials → 401 even on localhost with DEV_OPEN once a token is configured", async () => {
-    for (const p of ["/painel", "/api/panel/submissions"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
+    for (const p of ["/painel", "/painel/foto/demo-1", "/api/panel/submissions"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
     const st = await post("/mcp"); assert(st === 401, `/mcp → ${st}`);
   });
   await check("auth: wrong / empty Bearer → 401", async () => {
