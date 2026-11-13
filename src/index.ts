@@ -1,8 +1,9 @@
 // Coffee Time Worker: public site, panel (Cloudflare Access) and MCP (Bearer token). See ARCHITECTURE.md.
 import { Hono } from "hono";
 import { safeEqual, verifyAccess } from "./auth";
-import { panelPage, startPage } from "./pages";
+import { panelPage, privacyPage, startPage } from "./pages";
 import { registerDrafts } from "./api/drafts";
+import { registerSend } from "./api/send";
 
 export type Env = {
   DB: D1Database;
@@ -30,6 +31,8 @@ app.get("/", (c) => {
 });
 app.get("/api/health", (c) => c.json({ ok: true }));
 registerDrafts(app);
+registerSend(app);
+app.get("/privacidade", (c) => c.html(privacyPage()));
 
 // Owner and agent only.
 // - Agent: Authorization: Bearer AGENT_TOKEN.
