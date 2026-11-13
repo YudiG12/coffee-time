@@ -17,4 +17,6 @@ jobs:
       - run: npm ci
       - run: sed -i "s/REPLACE_WITH_YOUR_D1_ID/${{ secrets.D1_DATABASE_ID }}/" wrangler.jsonc
       - run: npm run db:migrate
+      # The browser PUTs straight to signed R2 URLs (ADR 0002): without this rule the preflight fails and no upload works.
+      - run: npx wrangler r2 bucket cors set coffee-time-media --file r2-cors.json --force
       - run: npm run deploy

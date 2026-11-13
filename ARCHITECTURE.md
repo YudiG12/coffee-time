@@ -5,7 +5,7 @@
 | Concern | How | Decision |
 |---|---|---|
 | Runtime | One **Worker**: public site (pt-BR), submit API, panel, MCP endpoint, queue consumer, hourly cron | [ADR 0001](docs/adr/0001-one-cloudflare-worker.md) |
-| Media | **R2**. Browser uploads straight to `incoming/` with short-lived signed URLs; on Send the Worker checks size and real type and moves files to `media/` | [ADR 0002](docs/adr/0002-direct-upload-with-quarantine.md) |
+| Media | **R2**. Browser uploads straight to `incoming/` with short-lived signed URLs; on Send the Worker checks size and real type and moves files to `media/`. The bucket's **CORS rule** ([`r2-cors.json`](r2-cors.json), applied on every deploy) lets the browser PUT/POST/GET/HEAD from any origin (the signed URL is the credential) and exposes `ETag`, which multipart completion reads | [ADR 0002](docs/adr/0002-direct-upload-with-quarantine.md) |
 | Messages | **D1**: submission, status, consent, transcript, tags | [ADR 0001](docs/adr/0001-one-cloudflare-worker.md) |
 | Heavy media work | **In the browser**: video to 1080p ~5 Mbps (WebCodecs), photos to WebP, voice distortion for anonymous audio, audio track extracted from video; upload starts when the file is picked | [ADR 0003](docs/adr/0003-processing-in-the-browser.md) |
 | Transcript and tags | A **Queue** job per submission: **Workers AI** Whisper, then a text model for free-form tags; retries, then a dead-letter queue | [ADR 0004](docs/adr/0004-transcription-and-free-tags.md) |
