@@ -9,6 +9,8 @@ export const URL_TTL = 900;                    // signed URLs live 15 min
 export const PART_SIZE = 10 * 1024 * 1024;     // multipart above 10 MB, in 10 MB parts
 export const MAX_BYTES = 300 * 1024 * 1024;    // browsers without WebCodecs upload the original, up to 300 MB
 export const RATE_LIMIT = 5;                   // drafts per IP per minute
+export const MAX_PHOTOS = 10;                  // photos per message
+export const MAX_PHOTO_BYTES = 20 * 1024 * 1024; // one photo, as picked (compression to WebP comes later)
 const BUCKET = "coffee-time-media";            // same bucket as the MEDIA binding in wrangler.jsonc
 
 // Cloudflare's documented Turnstile test secrets (always pass / always fail / token already spent).
@@ -76,15 +78,34 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
     return c.json({ id, key, expires_in: URL_TTL, upload }, 201);
   });
 
-  // Local dev only: stands in for the signed URL when the S3 secrets are absent. Never active in production.
-  app.put("/api/drafts/:id/media", async (c) => {
-    if (s3Of(c.env) || !isLocalDev(c.env, c.req.url)) return c.json({ error: "not found" }, 404);
+  // Photos (up to 10): the browser picks a slot 1–10 and gets one signed URL for `incoming/<id>/photo-<n>`.
+  // The draft id (random, only known to the sender) is the capability; Send checks every file before it counts.
+  app.post("/api/drafts/:id/photos", async (c) => {
+    const b = await c.req.json<any>().catch(() => null);
+    const n = b?.n, type = String(b?.type || ""), size = b?.size;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PHOTOS || !type.startsWith("image/") || type.length > 100 || !Number.isInteger(size) || size < 1 || size > MAX_PHOTO_BYTES)
+      return c.json({ error: "invalid photo" }, 400);
     const id = c.req.param("id");
-    const row = await c.env.DB.prepare("SELECT media_key FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', '-15 minutes')").bind(id).first<{ media_key: string }>();
+    const row = await c.env.DB.prepare("SELECT id FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', '-24 hours')").bind(id).first();
+    if (!row) return c.json({ error: "not found" }, 404);
+    const s3 = s3Of(c.env), dev = isLocalDev(c.env, c.req.url);
+    if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
+    const key = `incoming/${id}/photo-${n}`;
+    const upload = s3 ? { mode: "single", url: await presign(s3, "PUT", `/${BUCKET}/${key}`, { expires: URL_TTL }) } : { mode: "local", url: `/api/drafts/${id}/photo-${n}` };
+    return c.json({ key, expires_in: URL_TTL, upload }, 201);
+  });
+
+  // Local dev only: stands in for the signed URLs when the S3 secrets are absent. Never active in production.
+  // The media must arrive within 15 min of the draft (like its signed URL); photos while the draft is open.
+  app.put("/api/drafts/:id/:file{media|photo-(?:[1-9]|10)}", async (c) => {
+    if (s3Of(c.env) || !isLocalDev(c.env, c.req.url)) return c.json({ error: "not found" }, 404);
+    const id = c.req.param("id"), file = c.req.param("file"), photo = file !== "media";
+    const row = await c.env.DB.prepare(`SELECT id FROM submissions WHERE id = ? AND status = 'uploading' AND created_at >= datetime('now', ?)`)
+      .bind(id, photo ? "-24 hours" : "-15 minutes").first();
     if (!row) return c.json({ error: "not found" }, 404);
     const body = await c.req.arrayBuffer();
-    if (!body.byteLength || body.byteLength > MAX_BYTES) return c.json({ error: "invalid size" }, 400);
-    await c.env.MEDIA.put(row.media_key, body, { httpMetadata: { contentType: c.req.header("content-type") || "application/octet-stream" } });
+    if (!body.byteLength || body.byteLength > (photo ? MAX_PHOTO_BYTES : MAX_BYTES)) return c.json({ error: "invalid size" }, 400);
+    await c.env.MEDIA.put(`incoming/${id}/${file}`, body, { httpMetadata: { contentType: c.req.header("content-type") || "application/octet-stream" } });
     return c.body(null, 200);
   });
 };

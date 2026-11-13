@@ -75,6 +75,16 @@ const draft = (body, ip = fakeIp(), base = BASE) => fetch(base + "/api/drafts", 
   .then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
 const r2get = (key) => { const f = `.verify/r2-${Date.now()}`; sh(`npx wrangler r2 object get "coffee-time-media/${key}" --local --persist-to ${STATE} --file ${f}`); return readFileSync(f); };
 const VIDEO_FX = readFileSync("scripts/fixtures/video-3s-1080p.webm");
+// A WAV generated here (fake tone) and a 1×1 PNG, for audio and photo uploads.
+const wav = (sec, rate = 8000) => {
+  const n = Math.round(sec * rate), b = Buffer.alloc(44 + n);
+  b.write("RIFF", 0); b.writeUInt32LE(36 + n, 4); b.write("WAVE", 8); b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate, 28); b.writeUInt16LE(1, 32); b.writeUInt16LE(8, 34); b.write("data", 36); b.writeUInt32LE(n, 40);
+  for (let i = 0; i < n; i++) b[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 440 * i) / rate));
+  return b;
+};
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+const r2has = (key) => { try { execSync(`npx wrangler r2 object get "coffee-time-media/${key}" --local --persist-to ${STATE} --pipe`, { stdio: "ignore" }); return true; } catch { return false; } };
 await check("api: draft + upload of a fixture lands in R2 incoming/<id>/ as `uploading`", async () => {
   const d = await draft({ kind: "video", type: "video/webm", size: VIDEO_FX.length, duration: 3, token: "XXXX.DUMMY.TOKEN.XXXX" });
   assert(d.status === 201 && d.body.upload.mode === "local", `draft → ${d.status} ${JSON.stringify(d.body)}`);
@@ -104,9 +114,81 @@ await check("api: the 6th draft in a minute from one IP → 429, other IPs unaff
   const burstIp = fakeIp(), codes = (await Promise.all(Array.from({ length: 20 }, () => draft(b, burstIp)))).map((r) => r.status);
   assert(codes.filter((x) => x === 201).length === 5 && codes.filter((x) => x === 429).length === 15, `20 at once → ${codes.join(",")}`);
 });
+// ---- Send (ADR 0002): size + magic bytes for every file, move to media/, status `new` + consent; junk → `rejected`.
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+const putFile = (url, buf, type) => fetch(BASE + url, { method: "PUT", headers: { "content-type": type }, body: buf }).then((r) => r.status);
+const newDraft = async (kind, buf, type) => {
+  const d = await draft({ kind, type, size: buf.length, duration: 3, token: "x" }); assert(d.status === 201, `draft → ${d.status}`);
+  return d.body;
+};
+const addPhoto = async (id, n, buf = PNG, type = "image/png") => {
+  const r = await post(`/api/drafts/${id}/photos`, { n, type, size: buf.length }); assert(r.status === 201 && r.body.key === `incoming/${id}/photo-${n}`, `photo ${n} → ${r.status} ${JSON.stringify(r.body)}`);
+  assert((await putFile(r.body.upload.url, buf, type)) === 200, `photo ${n} upload failed`);
+};
+let sentId = null;
+await check("api: send a full submission (audio + photos) → `new` in /api/panel/submissions, files moved to media/", async () => {
+  const AUDIO = wav(3), d = await newDraft("audio", AUDIO, "audio/wav"), id = d.id;
+  assert((await putFile(d.upload.url, AUDIO, "audio/wav")) === 200, "media upload failed");
+  await addPhoto(id, 1); await addPhoto(id, 3); await addPhoto(id, 5); // photo 5 is "removed" before Send
+  for (const consent of [undefined, false, "yes"]) { const r = await post(`/api/drafts/${id}/send`, { consent, photos: [1, 3] }); assert(r.status === 400, `consent ${JSON.stringify(consent)} → ${r.status}`); }
+  for (const photos of [[0], [11], [1, 1], "1"]) { const r = await post(`/api/drafts/${id}/send`, { consent: true, photos }); assert(r.status === 400, `photos ${JSON.stringify(photos)} → ${r.status}`); }
+  const r = await post(`/api/drafts/${id}/send`, { consent: true, name: "  Ana    Teste ", photos: [3, 1] });
+  assert(r.status === 200 && r.body.status === "new" && r.body.name === "Ana Teste", `send → ${r.status} ${JSON.stringify(r.body)}`);
+  const listed = (await api("/api/panel/submissions")).body.find((x) => x.id === id);
+  assert(listed && listed.status === "new" && listed.name === "Ana Teste", `panel row: ${JSON.stringify(listed)}`);
+  const row = await mcpData("get_submission", { id });
+  assert(row.media_key === `media/${id}/media` && row.consent_at && row.anonymous === 0, JSON.stringify(row));
+  assert(JSON.stringify(JSON.parse(row.photo_keys)) === JSON.stringify([`media/${id}/photo-1`, `media/${id}/photo-3`]), `photo_keys ${row.photo_keys}`);
+  assert(r2get(`media/${id}/media`).equals(AUDIO) && r2get(`media/${id}/photo-3`).equals(PNG), "moved files differ");
+  for (const k of ["media", "photo-1", "photo-3", "photo-5"]) assert(!r2has(`incoming/${id}/${k}`), `incoming/${id}/${k} still there`);
+  assert(!r2has(`media/${id}/photo-5`), "a removed photo was kept");
+  const again = await post(`/api/drafts/${id}/send`, { consent: true }); assert(again.status === 404, `second send → ${again.status}`);
+  sentId = id;
+});
+await check("api: a file renamed to .mp4 that is not a video is rejected and deleted (also a fake photo)", async () => {
+  const FAKE = Buffer.from("isto não é um vídeo, só um texto com extensão .mp4\n".repeat(40));
+  const d = await newDraft("video", FAKE, "video/mp4");
+  assert((await putFile(d.upload.url, FAKE, "video/mp4")) === 200, "upload failed");
+  const r = await post(`/api/drafts/${d.id}/send`, { consent: true, name: "Teste" });
+  assert(r.status === 422, `send → ${r.status} ${JSON.stringify(r.body)}`);
+  assert((await mcpData("get_submission", { id: d.id })).status === "rejected", "draft not rejected");
+  assert(!r2has(`incoming/${d.id}/media`) && !r2has(`media/${d.id}/media`), "fake video not deleted");
+  assert(!(await api("/api/panel/submissions?status=new")).body.some((x) => x.id === d.id), "rejected draft listed as new");
+  // A real audio with a text file posing as a photo: the whole draft is refused and nothing is kept.
+  const AUDIO = wav(2), d2 = await newDraft("audio", AUDIO, "audio/wav");
+  await putFile(d2.upload.url, AUDIO, "audio/wav"); await addPhoto(d2.id, 2, FAKE.subarray(0, 200), "image/jpeg");
+  const r2 = await post(`/api/drafts/${d2.id}/send`, { consent: true, photos: [2] });
+  assert(r2.status === 422 && JSON.stringify(r2.body.files) === '["photo-2"]', `fake photo → ${r2.status} ${JSON.stringify(r2.body)}`);
+  assert((await mcpData("get_submission", { id: d2.id })).status === "rejected" && !r2has(`incoming/${d2.id}/media`) && !r2has(`incoming/${d2.id}/photo-2`), "fake photo draft not cleaned");
+});
+await check("api: Send before the upload → 409 (draft stays open); anonymous audio drops the name; video can't be anonymous", async () => {
+  const AUDIO = wav(2), d = await newDraft("audio", AUDIO, "audio/wav");
+  const early = await post(`/api/drafts/${d.id}/send`, { consent: true }); assert(early.status === 409, `before upload → ${early.status}`);
+  assert((await mcpData("get_submission", { id: d.id })).status === "uploading", "draft closed by an early Send");
+  await putFile(d.upload.url, AUDIO, "audio/wav");
+  const missing = await post(`/api/drafts/${d.id}/send`, { consent: true, photos: [4] }); assert(missing.status === 409, `photo not uploaded → ${missing.status}`);
+  const r = await post(`/api/drafts/${d.id}/send`, { consent: true, anonymous: true, name: "Fulano" });
+  const row = await mcpData("get_submission", { id: d.id });
+  assert(r.status === 200 && row.anonymous === 1 && row.name === null && row.status === "new", `anonymous → ${r.status} ${JSON.stringify(row)}`);
+  const v = await newDraft("video", VIDEO_FX, "video/webm"); await putFile(v.upload.url, VIDEO_FX, "video/webm");
+  const rv = await post(`/api/drafts/${v.id}/send`, { consent: true, anonymous: true, name: "Rafa" });
+  const vrow = await mcpData("get_submission", { id: v.id });
+  assert(rv.status === 200 && vrow.anonymous === 0 && vrow.name === "Rafa", `video → ${rv.status} ${JSON.stringify(vrow)}`);
+  assert((await post("/api/drafts/nope/send", { consent: true })).status === 404, "unknown draft accepted");
+});
+await check("api: photo URLs only for slots 1–10, images ≤ 20 MB, open drafts", async () => {
+  const d = await newDraft("audio", wav(1), "audio/wav");
+  for (const b of [{ n: 0 }, { n: 11 }, { n: 1.5 }, { n: 1, type: "text/plain" }, { n: 1, size: 20 * 1024 * 1024 + 1 }, { n: 1, size: 0 }]) {
+    const r = await post(`/api/drafts/${d.id}/photos`, { type: "image/png", size: 100, ...b }); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`);
+  }
+  assert((await post("/api/drafts/nope/photos", { n: 1, type: "image/png", size: 100 })).status === 404, "unknown draft");
+  assert((await post(`/api/drafts/${sentId}/photos`, { n: 1, type: "image/png", size: 100 })).status === 404, "photo URL for a sent message");
+  assert((await putFile(`/api/drafts/${sentId}/photo-2`, PNG, "image/png")) === 404, "upload to a sent message accepted");
+  assert((await putFile(`/api/drafts/${d.id}/photo-11`, PNG, "image/png")) === 404, "slot 11 accepted");
+});
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
-  const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts";' }).toString();
+  const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts"; export * from "./src/api/sniff.ts";' }).toString();
   const m = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
   await check("api: presigned URLs match AWS's SigV4 example; multipart URLs carry part, uploadId and ≤ 15 min", async () => {
     const aws = { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", host: "examplebucket.s3.amazonaws.com", region: "us-east-1" };
@@ -116,6 +198,42 @@ await check("api: the 6th draft in a minute from one IP → 429, other IPs unaff
     assert(mp.parts.length === 3 && mp.parts.every((p, i) => { const q = new URL(p).searchParams; return q.get("partNumber") === String(i + 1) && q.get("uploadId") === "UP1" && Number(q.get("X-Amz-Expires")) <= 900; }), "part URLs");
     assert(new URL(mp.complete).searchParams.get("uploadId") === "UP1" && !new URL(mp.complete).searchParams.has("partNumber"), "complete URL");
     assert(m.PART_SIZE === 10 * 1024 * 1024 && m.URL_TTL <= 900, "part size / TTL");
+  });
+  await check("api: magic bytes — WAV, WebM, MP4, PNG, JPEG, HEIC pass; text and a PNG posing as media fail", async () => {
+    const b = (x) => new Uint8Array(Buffer.from(x));
+    const mp4 = new Uint8Array([0, 0, 0, 0x20, ...b("ftypisom"), 0, 0, 2, 0]), heic = new Uint8Array([0, 0, 0, 0x18, ...b("ftypheic"), 0, 0, 0, 0]);
+    const text = b("isto não é um vídeo".repeat(10)), jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16]);
+    const cases = [["audio", wav(1), true], ["video", VIDEO_FX, true], ["audio", VIDEO_FX, true], ["video", mp4, true], ["audio", mp4, true], ["photo", PNG, true], ["photo", jpeg, true], ["photo", heic, true],
+      ["video", text, false], ["audio", text, false], ["photo", text, false], ["video", PNG, false], ["video", heic, false], ["photo", mp4, false], ["audio", new Uint8Array(), false]];
+    for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
+  });
+  // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
+  await check("api: Send survives a storage error halfway (originals kept until committed, retry works)", async () => {
+    const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
+    const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
+    globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
+    const store = new Map([["incoming/d1/media", wav(1)], ["incoming/d1/photo-1", PNG], ["incoming/d1/photo-2", PNG]]);
+    let failPut = "media/d1/photo-2", row = { id: "d1", kind: "audio", media_key: "incoming/d1/media", status: "uploading" };
+    const MEDIA = {
+      head: async (k) => (store.has(k) ? { size: store.get(k).length } : null),
+      get: async (k, o) => { if (!store.has(k)) return null; const b = store.get(k), r = o?.range ? b.subarray(o.range.offset, o.range.offset + o.range.length) : b;
+        return { size: b.length, httpMetadata: {}, arrayBuffer: async () => r, body: new Blob([r]).stream() }; },
+      put: async (k, body) => { const buf = Buffer.from(await new Response(body).arrayBuffer()); if (k === failPut) { failPut = null; throw new Error("R2 hiccup"); } store.set(k, buf); return { key: k }; },
+      delete: async (k) => [].concat(k).forEach((x) => store.delete(x)),
+      list: async ({ prefix }) => ({ objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }),
+    };
+    const DB = { prepare: (sql) => ({ bind: (...a) => ({
+      first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
+      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading") { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
+    }) }) };
+    const app = new sm.Hono(); sm.registerSend(app);
+    const send = () => app.request("/api/drafts/d1/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ consent: true, photos: [1, 2] }) }, { DB, MEDIA });
+    const first = await send();
+    assert(first.status === 503 && row.status === "uploading", `failed send → ${first.status}, status ${row.status}`);
+    for (const k of ["media", "photo-1", "photo-2"]) assert(store.has(`incoming/d1/${k}`), `incoming/d1/${k} deleted by a failed send`);
+    const retry = await send();
+    assert(retry.status === 200 && row.status === "new" && row.media_key === "media/d1/media", `retry → ${retry.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
     assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
@@ -289,13 +407,6 @@ await check("ui: double click on record starts one recording, tabs lock, stop re
   await ctx.close();
 });
 // "Envie um arquivo": a WAV generated here and WebM fixtures in scripts/fixtures/ (made with ffmpeg, see README there).
-const wav = (sec, rate = 8000) => {
-  const n = Math.round(sec * rate), b = Buffer.alloc(44 + n);
-  b.write("RIFF", 0); b.writeUInt32LE(36 + n, 4); b.write("WAVE", 8); b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
-  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate, 28); b.writeUInt16LE(1, 32); b.writeUInt16LE(8, 34); b.write("data", 36); b.writeUInt32LE(n, 40);
-  for (let i = 0; i < n; i++) b[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * 440 * i) / rate));
-  return b;
-};
 const FX = {
   audio: { name: "mensagem.wav", mimeType: "audio/wav", buffer: wav(3) },
   audioLong: { name: "longo.wav", mimeType: "audio/wav", buffer: wav(100) },
@@ -435,6 +546,104 @@ await check("ui: swapping the file during a retry wait cancels the old upload fo
   assert((await p.getAttribute("#up", "data-state")) === "done" && (await p.getAttribute("#up", "data-draft")) !== first, "replacement upload was disturbed");
   await ctx.close();
 });
+// Ready form and thanks as in docs/design/*-1-audio-ready.png and *-2-thanks.png.
+const PHOTOS = [{ name: "eu.png", mimeType: "image/png", buffer: PNG }, { name: "setup.png", mimeType: "image/png", buffer: PNG }];
+await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, send, thanks (mobile + desktop)", async () => {
+  for (const [vp, name, desktop] of [[{ width: 390, height: 844 }, "mobile", false], [{ width: 1440, height: 900 }, "desktop", true]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
+    assert(!(await p.locator("#form").isVisible()), `${name}: form shown before there is media`);
+    await p.setInputFiles("#file", FX.audio);
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+    const t = (await p.locator("#form").innerText()).replace(/\s+/g, " ");
+    for (const x of ["Anonimizar voz", "O áudio fica distorcido e sua voz não é reconhecida.", "Nome · opcional", "0 / 10 fotos", "Manda uma foto sua! Se sua mensagem entrar no vlog, eu mostro você no vídeo.", "Autorizo o uso deste envio nos vídeos do canal, conforme a política de privacidade.", "Enviar"])
+      assert(t.includes(x), `${name}: missing "${x}" in: ${t}`);
+    assert(!/\p{Extended_Pictographic}/u.test(t), `${name}: emoji in the form`);
+    for (const sel of [".anon-icon", ".nudge", "#photo-add"]) assert(await p.locator(`${sel} svg`).count() === 1, `${sel} has no SVG icon`);
+    const link = p.locator(".consent a"); assert((await link.getAttribute("href")) === "/privacidade" && (await link.getAttribute("target")) === "_blank", `${name}: privacy link`);
+    // Enviar only with consent.
+    assert(await p.locator("#send").isDisabled(), `${name}: Enviar enabled without consent`);
+    await p.click("#consent"); assert(await p.locator("#send").isEnabled(), `${name}: Enviar disabled with media + consent`);
+    await p.click("#consent"); assert(await p.locator("#send").isDisabled(), `${name}: Enviar enabled after unchecking consent`);
+    // Anonimizar voz hides the name field and is sent as anonymous; off again brings it back.
+    await p.click("#anon");
+    assert((await p.getAttribute("#anon", "aria-checked")) === "true" && !(await p.locator("#name").isVisible()), `${name}: name still visible with Anonimizar voz on`);
+    await p.click("#anon"); assert(await p.locator("#name").isVisible(), `${name}: name hidden with Anonimizar voz off`);
+    await p.fill("#name", "Marina Souza");
+    await p.setInputFiles("#photo-file", PHOTOS);
+    await p.waitForFunction(() => document.querySelectorAll("#photo-list img").length === 2);
+    assert((await p.locator("#photo-count").innerText()).trim() === "2 / 10 fotos", `${name}: count ${await p.locator("#photo-count").innerText()}`);
+    await p.click("#consent");
+    assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${name}: horizontal scroll`);
+    await p.screenshot({ path: `${OUT}/form-${name}.png`, fullPage: true });
+    const id = await p.getAttribute("#up", "data-draft");
+    await p.click("#send");
+    await p.locator("#thanks").waitFor({ state: "visible", timeout: 10000 });
+    const th = (await p.locator("#thanks").innerText()).replace(/\s+/g, " ");
+    for (const x of ["Valeu demais!", "Obrigado por mandar sua mensagem, Marina.", "Quer remover seu envio?", "Escreva para contato@yudiganeko.com.", "Enviar outro"]) assert(th.toLowerCase().includes(x.toLowerCase()), `${name}: thanks missing "${x}" in: ${th}`);
+    assert(await p.locator("#thanks h2 svg").count() === 1 && !/\p{Extended_Pictographic}/u.test(th), `${name}: thanks icon / emoji`);
+    assert((await p.locator(".hero").isVisible()) === desktop, `${name}: hero ${desktop ? "hidden" : "shown"} on the thanks screen`);
+    assert(!(await p.locator("#form").isVisible()) && !(await p.locator(".tabs").isVisible()), `${name}: form or tabs still visible after Send`);
+    await p.screenshot({ path: `${OUT}/thanks-${name}.png`, fullPage: true });
+    const row = await mcpData("get_submission", { id });
+    assert(row.status === "new" && row.name === "Marina Souza" && row.anonymous === 0 && JSON.parse(row.photo_keys).length === 2 && row.consent_at, `${name}: saved ${JSON.stringify(row)}`);
+    assert((await api("/api/panel/submissions?status=new")).body.some((x) => x.id === id), `${name}: not in the panel as new`);
+    await p.click("#again"); await p.locator("#upload").waitFor({ state: "visible", timeout: 5000 });
+    await ctx.close();
+  }
+});
+await check("ui: anonymous audio is saved without a name; a video has no Anonimizar voz and keeps the name", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
+  await p.setInputFiles("#file", FX.video);
+  await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
+  assert(!(await p.locator("#anon").isVisible()) && (await p.locator("#name").isVisible()), "video: Anonimizar voz shown or name hidden");
+  await p.screenshot({ path: `${OUT}/form-video-mobile.png`, fullPage: true });
+  await p.click("#tab-audio"); await p.setInputFiles("#file", FX.audio);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await p.fill("#name", "Fulano"); await p.click("#anon"); await p.click("#consent");
+  const id = await p.getAttribute("#up", "data-draft");
+  await p.click("#send"); await p.locator("#thanks").waitFor({ state: "visible", timeout: 10000 });
+  assert((await p.locator("#thanks-text").innerText()).startsWith("Obrigado por mandar sua mensagem. "), `thanks text: ${await p.locator("#thanks-text").innerText()}`);
+  const row = await mcpData("get_submission", { id });
+  assert(row.anonymous === 1 && row.name === null && row.status === "new", JSON.stringify(row));
+  await ctx.close();
+});
+// The switch promises a distorted voice; until the distortion (#9) exists the real page must not offer it.
+await check("ui: without the voice distortion the page has no Anonimizar voz (name always shown)", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.audio);
+  await p.locator("#form").waitFor({ state: "visible", timeout: 8000 });
+  assert(await p.locator("#anon, .anon").count() === 0, "Anonimizar voz switch in the page");
+  assert(!/anonimiz|distorcid/i.test(await p.locator("body").innerText()), "page text promises a distorted voice");
+  assert(await p.locator("#name").isVisible(), "name hidden");
+  await p.screenshot({ path: `${OUT}/form-audio-default-mobile.png`, fullPage: true });
+  await ctx.close();
+});
+await check("ui: Enviar waits for an upload still running, then sends", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  let release; const held = new Promise((r) => (release = r));
+  await p.route("**/api/drafts/*/media", async (r) => { await held; await r.continue(); });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.video);
+  await p.locator("#up[data-state=uploading][data-draft]").waitFor({ state: "visible", timeout: 8000 });
+  await p.click("#consent"); await p.click("#send");
+  await p.waitForTimeout(500);
+  assert((await p.locator("#send").innerText()).trim() === "Enviando…" && !(await p.locator("#thanks").isVisible()), "sent before the upload finished");
+  release();
+  await p.locator("#thanks").waitFor({ state: "visible", timeout: 10000 });
+  await ctx.close();
+});
+await check("ui: privacy page explains deletion by e-mail and that published videos stay online", async () => {
+  const t = await shot("privacy-mobile", "/privacidade", { width: 390, height: 844 });
+  for (const x of ["Política de privacidade", "contato@yudiganeko.com", "Vídeos já publicados no canal continuam no ar."]) assert(t.includes(x), `missing "${x}"`);
+  assert(!/\p{Extended_Pictographic}/u.test(t), "emoji in the privacy page");
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
@@ -447,6 +656,8 @@ await check("ui: record main flow", async () => {
   await p.click("#tab-video"); await p.waitForTimeout(800); await p.click("#tab-audio"); await p.waitForTimeout(600);
   await p.click("#record"); await p.waitForTimeout(2500); await p.click("#stop"); await p.waitForTimeout(1500);
   await p.click("#tab-video"); await p.waitForTimeout(600); await p.setInputFiles("#file", FX.video); await p.waitForTimeout(1800);
+  await p.fill("#name", "Rafael Lima"); await p.setInputFiles("#photo-file", PHOTOS[0]); await p.click("#consent"); await p.waitForTimeout(800);
+  await p.click("#send"); await p.locator("#thanks").waitFor({ state: "visible", timeout: 10000 }); await p.waitForTimeout(1800);
   await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); await p.waitForTimeout(1500);
   const vid = await p.video().path(); await ctx.close();
   try { execSync(`ffmpeg -y -loglevel error -i ${vid} -vf "fps=8,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" ${OUT}/flow.gif`); }
@@ -495,6 +706,10 @@ await browser.close();
     assert(Math.abs(at - t0) < 60_000, `X-Amz-Date ${q.get("X-Amz-Date")}`);
     assert(/^[0-9a-f]{64}$/.test(q.get("X-Amz-Signature") || "") && q.get("X-Amz-Credential").startsWith("verify-fake-key/"), "signature / credential");
     assert((await fetch(B3 + `/api/drafts/${d.body.id}/media`, { method: "PUT", body: "x" })).status === 404, "Worker upload route open while S3 keys are set");
+    const ph = await fetch(B3 + `/api/drafts/${d.body.id}/photos`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ n: 2, type: "image/jpeg", size: 2_000_000 }) }).then((r) => r.json());
+    const pu = new URL(ph.upload.url);
+    assert(ph.upload.mode === "single" && pu.pathname === `/coffee-time-media/incoming/${d.body.id}/photo-2` && Number(pu.searchParams.get("X-Amz-Expires")) <= 900, `photo url ${ph.upload.url}`);
+    assert((await fetch(B3 + `/api/drafts/${d.body.id}/photo-2`, { method: "PUT", body: "x" })).status === 404, "Worker photo route open while S3 keys are set");
   });
   kill3();
 }
