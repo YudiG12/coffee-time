@@ -9,6 +9,9 @@
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "coffee-time-media" }
   ],
-  // Secrets (wrangler secret put): AGENT_TOKEN. Vars set in the dashboard: ACCESS_TEAM_DOMAIN, ACCESS_AUD.
+  // Public vars. keep_vars keeps the ones set in the dashboard (ACCESS_TEAM_DOMAIN, ACCESS_AUD) on deploy.
+  "vars": { "TURNSTILE_SITE_KEY": "0x4AAAAAAF-1nui9upefCZ7a", "R2_ACCOUNT_ID": "337de6b8e4de301a53ecae0c06afcc72" },
+  "keep_vars": true,
+  // Secrets (wrangler secret put): AGENT_TOKEN, TURNSTILE_SECRET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY. Vars set in the dashboard: ACCESS_TEAM_DOMAIN, ACCESS_AUD.
   "observability": { "enabled": true }
 }
