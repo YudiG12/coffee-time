@@ -207,6 +207,34 @@ await check("api: photo URLs only for slots 1–10, images ≤ 20 MB, open draft
       ["video", text, false], ["audio", text, false], ["photo", text, false], ["video", PNG, false], ["video", heic, false], ["photo", mp4, false], ["audio", new Uint8Array(), false]];
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
+  // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
+  await check("api: Send survives a storage error halfway (originals kept until committed, retry works)", async () => {
+    const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
+    const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
+    globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
+    const store = new Map([["incoming/d1/media", wav(1)], ["incoming/d1/photo-1", PNG], ["incoming/d1/photo-2", PNG]]);
+    let failPut = "media/d1/photo-2", row = { id: "d1", kind: "audio", media_key: "incoming/d1/media", status: "uploading" };
+    const MEDIA = {
+      head: async (k) => (store.has(k) ? { size: store.get(k).length } : null),
+      get: async (k, o) => { if (!store.has(k)) return null; const b = store.get(k), r = o?.range ? b.subarray(o.range.offset, o.range.offset + o.range.length) : b;
+        return { size: b.length, httpMetadata: {}, arrayBuffer: async () => r, body: new Blob([r]).stream() }; },
+      put: async (k, body) => { const buf = Buffer.from(await new Response(body).arrayBuffer()); if (k === failPut) { failPut = null; throw new Error("R2 hiccup"); } store.set(k, buf); return { key: k }; },
+      delete: async (k) => [].concat(k).forEach((x) => store.delete(x)),
+      list: async ({ prefix }) => ({ objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }),
+    };
+    const DB = { prepare: (sql) => ({ bind: (...a) => ({
+      first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
+      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading") { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
+    }) }) };
+    const app = new sm.Hono(); sm.registerSend(app);
+    const send = () => app.request("/api/drafts/d1/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ consent: true, photos: [1, 2] }) }, { DB, MEDIA });
+    const first = await send();
+    assert(first.status === 503 && row.status === "uploading", `failed send → ${first.status}, status ${row.status}`);
+    for (const k of ["media", "photo-1", "photo-2"]) assert(store.has(`incoming/d1/${k}`), `incoming/d1/${k} deleted by a failed send`);
+    const retry = await send();
+    assert(retry.status === 200 && row.status === "new" && row.media_key === "media/d1/media", `retry → ${retry.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
+  });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
     assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
     assert(await m.checkTurnstile("", "1x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "empty token passed");

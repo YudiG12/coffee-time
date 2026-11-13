@@ -1,6 +1,6 @@
 // Send (ADR 0002): POST /api/drafts/:id/send turns an `uploading` draft into a message.
 // For every file in `incoming/<id>/` it checks the size (HEAD) and the real type (magic bytes of the first 4 KB),
-// then moves the files to `media/<id>/`, saves name, anonymous flag and consent, and sets status `new`.
+// then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
 // A file that fails the check deletes the draft's files and marks it `rejected`. A file not uploaded yet → 409.
 import type { Hono } from "hono";
 import type { Env } from "../index";
@@ -22,14 +22,14 @@ const head = async (bucket: R2Bucket, key: string) => {
   return { size: meta.size, bytes: obj ? new Uint8Array(await obj.arrayBuffer()) : new Uint8Array() };
 };
 
-// R2 has no rename: copy (streamed, so a 300 MB video never sits in memory) and delete.
-const move = async (bucket: R2Bucket, from: string, to: string) => {
+// R2 has no rename: copy (streamed, so a 300 MB video never sits in memory). The incoming/ originals are deleted
+// only after D1 says `new`, so a storage error halfway leaves the draft whole and Send can simply be retried.
+const copy = async (bucket: R2Bucket, from: string, to: string) => {
   const obj = await bucket.get(from);
   if (!obj) throw new Error(`missing ${from}`);
   const { readable, writable } = new FixedLengthStream(obj.size);
   const [, put] = await Promise.all([obj.body.pipeTo(writable), bucket.put(to, readable, { httpMetadata: obj.httpMetadata })]);
   if (!put) throw new Error(`copy failed ${to}`);
-  await bucket.delete(from);
 };
 
 const deleteIncoming = async (bucket: R2Bucket, id: string) => {
@@ -67,11 +67,14 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
       return c.json({ error: "invalid file", files: bad.map((f) => f.from.split("/").pop()) }, 422);
     }
 
-    for (const f of files) await move(bucket, f.from, f.to);
-    await deleteIncoming(bucket, id); // photos uploaded but not sent (removed before Send)
+    try { for (const f of files) await copy(bucket, f.from, f.to); }
+    catch { return c.json({ error: "storage" }, 503); } // nothing committed: the browser can send again
     const r = await db.prepare("UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, photo_keys = ? WHERE id = ? AND status = 'uploading'")
       .bind(name, anonymous ? 1 : 0, files[0].to, JSON.stringify(files.slice(1).map((f) => f.to)), id).run();
     if (!r.meta.changes) return c.json({ error: "not found" }, 404);
+    // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
+    // incoming/, never a broken message.
+    await deleteIncoming(bucket, id).catch(() => {});
     return c.json({ id, status: "new", name }, 200);
   });
 };
