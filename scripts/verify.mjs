@@ -47,7 +47,7 @@ writeFileSync(STUBCONF, JSON.stringify({ name: "coffee-time-ai-stub", main: "../
 
 let log = "";
 const serve = (port, vars) => {
-  const args = ["wrangler", "dev", "-c", VCONF, "-c", STUBCONF, "--port", String(port), "--persist-to", STATE, ...["JOBS_RETRY_BASE_S:0", ...vars].flatMap((v) => ["--var", v])];
+  const args = ["wrangler", "dev", "-c", VCONF, "-c", STUBCONF, "--port", String(port), "--persist-to", STATE, "--test-scheduled", ...["JOBS_RETRY_BASE_S:0", ...vars].flatMap((v) => ["--var", v])];
   const p = spawn("npx", args, { stdio: ["ignore", "pipe", "pipe"], detached: true });
   p.stdout.on("data", (d) => (log += d)); p.stderr.on("data", (d) => (log += d));
   const kill = () => { try { process.kill(-p.pid, "SIGTERM"); } catch {} };
@@ -58,7 +58,7 @@ const up = async (base) => { for (let i = 0; i < 60; i++) { try { if ((await fet
 
 // Cloudflare's Turnstile test keys (always pass); the Worker answers them offline in local dev.
 const TS_SITE = "1x00000000000000000000AA", TS_PASS = "1x0000000000000000000000000000000AA";
-const stop = serve(PORT, ["DEV_OPEN:1", `TURNSTILE_SITE_KEY:${TS_SITE}`, `TURNSTILE_SECRET:${TS_PASS}`]);
+const stop = serve(PORT, ["DEV_OPEN:1", "SWEEP_BATCH:1", `TURNSTILE_SITE_KEY:${TS_SITE}`, `TURNSTILE_SECRET:${TS_PASS}`]);
 await up(BASE);
 
 const api = async (path, init) => { const r = await fetch(BASE + path, { ...init, headers: { "content-type": "application/json", ...(init?.headers || {}) } }); return { status: r.status, body: await r.json().catch(() => null) }; };
@@ -318,7 +318,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits)", async () => {
+  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits); a commit lost to the sweep removes its copies, never when the owner is unknown", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -333,8 +333,8 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
       list: async ({ prefix }) => ({ objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }),
     };
     const DB = { prepare: (sql) => ({ bind: (...a) => ({
-      first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
-      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading") { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
+      first: async () => { if (row.lookupFails && /SELECT status/.test(sql)) throw new Error("D1 hiccup"); return row.status === "uploading" && a[0] === row.id ? row : null; },
+      run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading" && !row.claimed) { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
     }) }) };
     const jobs = [], JOBS = { send: async (m) => { jobs.push(m); } };
     const app = new sm.Hono(); sm.registerSend(app);
@@ -354,6 +354,17 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     JOBS.send = realSend; const back = await send();
     assert(back.status === 200 && row.status === "new" && jobs.length === 2, `retry after the queue is back → ${back.status}, status ${row.status}, jobs ${jobs.length}`);
     assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
+    // The hourly sweep claims the draft while Send is copying: the commit is refused and the copies are removed, so
+    // the sweep's delete can't leave a message without files, and no file is left behind in media/.
+    Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" }); for (const k of ["media", "photo-1", "photo-2"]) { store.set(`incoming/d1/${k}`, store.get(`media/d1/${k}`)); store.delete(`media/d1/${k}`); }
+    JOBS.send = async (m) => { jobs.push(m); row.claimed = true; };
+    const lost = await send(); JOBS.send = realSend; delete row.claimed;
+    assert(lost.status === 404 && row.status === "uploading", `send that lost to the sweep → ${lost.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => !store.has(`media/d1/${k}`)), `copies left in media/: ${[...store.keys()].join(",")}`);
+    // Same, but D1 can't say who owns the copies (the status lookup fails): they are kept, never deleted on a guess.
+    JOBS.send = async (m) => { jobs.push(m); row.claimed = true; row.lookupFails = true; };
+    const unknown = await send(); JOBS.send = realSend; delete row.claimed; delete row.lookupFails;
+    assert(unknown.status === 404 && ["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`)), `status unknown → ${unknown.status}, copies deleted: ${[...store.keys()].join(",")}`);
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
     assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
@@ -467,6 +478,66 @@ await check("api: Apagar envio deletes the R2 objects and the row", async () => 
   assert(!(await panelRow(id)) && (await mcp("get_submission", { id })).body.result.isError, "row still there");
   assert((await del(`/api/panel/submissions/${id}`)).status === 404, "second delete");
   assert((await fetch(`${BASE}/painel/envio/${id}`)).status === 404, "detail of a deleted message");
+});
+
+// ---- Hourly sweep (ADR 0002): wrangler dev --test-scheduled exposes the Cron at /__scheduled. Drafts are made
+// through the API, then aged in the local D1, so each rule is hit by a draft of the right age.
+const d1sql = (sql) => sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --command "${sql}"`);
+const age = (id, created, sendAt = null) => d1sql(`UPDATE submissions SET created_at = datetime('now','${created}')${sendAt ? `, send_at = datetime('now','${sendAt}')` : ""} WHERE id = '${id}'`);
+const rowOf = async (id) => { const r = await mcp("get_submission", { id }); return r.body.result.isError ? null : JSON.parse(r.body.result.content[0].text); };
+const runSweep = async () => { const r = await fetch(BASE + "/__scheduled?cron=0+*+*+*+*"); assert(r.ok, `/__scheduled → ${r.status}`); await wait(1500); };
+let sweptId = null;
+await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes drafts after 24 h and failed sends after 7 days; stuck sends go to the back of the line; a claimed draft can't be sent", async () => {
+  const JUNK = Buffer.from("this is not audio at all, just text ".repeat(20));
+  const make = async (buf = wav(1)) => { const d = await newDraft("audio", buf, "audio/wav"); return d; };
+  const upload = async (d, buf = wav(1)) => assert((await putFile(d.upload.url, buf, "audio/wav")) === 200, "upload failed");
+  const pressSend = async (d, body = {}) => { const r = await post(`/api/drafts/${d.id}/send`, { consent: true, ...body }); assert(r.status === 409, `early send → ${r.status}`); };
+  // Fresh draft nobody sent (kept), and one 25 h old (deleted with its files).
+  const fresh = await make(); await upload(fresh);
+  const stale = await make(); await upload(stale); await addPhoto(stale.id, 1); age(stale.id, "-25 hours");
+  // Enviar pressed before the files were complete (the tab closed, Send never answered); the files finished later.
+  const ok = await make(); await addPhoto(ok.id, 2); await pressSend(ok, { name: "  Sweep  Teste ", photos: [2] }); await upload(ok); age(ok.id, "-30 minutes", "-15 minutes");
+  // Same, but still inside the 10-minute grace (the browser may still be sending): left alone.
+  const recent = await make(); await pressSend(recent); await upload(recent);
+  // Junk that arrived after Enviar → rejected and its files deleted.
+  const junk = await make(JUNK); await pressSend(junk); await upload(junk, JUNK); age(junk.id, "-1 hours", "-50 minutes");
+  // Files never completed: kept for 7 days, then deleted. A rejected message older than 7 days is deleted too.
+  const missing = await make(); await pressSend(missing); age(missing.id, "-2 days", "-2 days");
+  const expired = await make(); await addPhoto(expired.id, 1); await pressSend(expired, { photos: [1] }); age(expired.id, "-8 days", "-8 days");
+  const oldJunk = await make(JUNK); await upload(oldJunk, JUNK); assert((await post(`/api/drafts/${oldJunk.id}/send`, { consent: true })).status === 422, "junk not rejected"); age(oldJunk.id, "-8 days", "-8 days");
+  const before = (await api("/api/panel/submissions")).body.filter((x) => x.id.startsWith("demo-")).map((x) => `${x.id}:${x.status}`).join();
+
+  // One send per run (SWEEP_BATCH=1): the oldest send, whose files are missing, is tried first and then goes to the
+  // back of the line, so the valid ones behind it are finished on the next runs instead of waiting for it forever.
+  await runSweep();
+  const first = Object.fromEntries(await Promise.all(Object.entries({ ok, junk, missing }).map(async ([k, d]) => [k, await rowOf(d.id)])));
+  assert(first.missing?.status === "uploading" && first.missing.sweep_at && first.junk?.status === "uploading" && first.ok?.status === "uploading",
+    `run 1: ${Object.entries(first).map(([k, r]) => `${k}=${r?.status}/${r?.sweep_at}`).join(" ")}`);
+  await runSweep(); assert((await rowOf(junk.id))?.status === "rejected", "run 2 did not move on to the next send (starved by a stuck one)");
+  await runSweep();
+  const s = Object.fromEntries(await Promise.all(Object.entries({ fresh, stale, ok, recent, junk, missing, expired, oldJunk }).map(async ([k, d]) => [k, await rowOf(d.id)])));
+  assert(s.fresh?.status === "uploading" && r2has(`incoming/${fresh.id}/media`), `fresh draft: ${s.fresh?.status}`);
+  assert(!s.stale && !r2has(`incoming/${stale.id}/media`) && !r2has(`incoming/${stale.id}/photo-1`), `24 h draft: ${s.stale?.status}`);
+  assert(s.ok?.status === "new" && s.ok.name === "Sweep Teste" && s.ok.consent_at && s.ok.send_request === null, `unconfirmed send: ${JSON.stringify(s.ok)?.slice(0, 200)}`);
+  assert(s.ok.media_key === `media/${ok.id}/media` && s.ok.photo_keys === `["media/${ok.id}/photo-2"]`, `keys ${s.ok.media_key} ${s.ok.photo_keys}`);
+  assert(r2has(`media/${ok.id}/media`) && r2has(`media/${ok.id}/photo-2`) && !r2has(`incoming/${ok.id}/media`), "files not moved to media/");
+  assert(s.recent?.status === "uploading" && r2has(`incoming/${recent.id}/media`), `send in its grace period: ${s.recent?.status}`);
+  assert(s.junk?.status === "rejected" && !r2has(`incoming/${junk.id}/media`), `junk: ${s.junk?.status}`);
+  assert(s.missing?.status === "uploading", `missing files, 2 days: ${s.missing?.status}`);
+  assert(!s.expired && !r2has(`incoming/${expired.id}/photo-1`), `missing files, 8 days: ${s.expired?.status}`);
+  assert(!s.oldJunk, `rejected, 8 days: ${s.oldJunk?.status}`);
+  // The finished send gets its transcript like any other; the demo messages are untouched; a second run changes nothing.
+  // (polling tolerates a dropped keep-alive socket while the queue consumer runs)
+  assert(await until(async () => (await panelRow(ok.id).catch(() => null))?.transcript != null, 30000), "swept message never transcribed");
+  await runSweep();
+  assert((await rowOf(ok.id))?.status === "new" && (await rowOf(fresh.id))?.status === "uploading" && (await rowOf(missing.id))?.status === "uploading", "second sweep changed something");
+  assert((await api("/api/panel/submissions")).body.filter((x) => x.id.startsWith("demo-")).map((x) => `${x.id}:${x.status}`).join() === before, "demo messages changed");
+  // A draft the sweep has claimed for deletion (sweep_at = 'deleting') can't be sent any more: 404, nothing copied.
+  const claimed = await make(); await upload(claimed); d1sql(`UPDATE submissions SET sweep_at = 'deleting' WHERE id = '${claimed.id}'`);
+  const late = await post(`/api/drafts/${claimed.id}/send`, { consent: true, name: "Tarde" });
+  const cRow = await rowOf(claimed.id);
+  assert(late.status === 404 && cRow?.status === "uploading" && cRow.send_request === null && !r2has(`media/${claimed.id}/media`), `send of a claimed draft → ${late.status} ${cRow?.status}`);
+  sweptId = ok.id;
 });
 
 // ---- Screens ----
@@ -1120,6 +1191,11 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   await p.screenshot({ path: `${OUT}/panel-detail-video.png`, fullPage: true });
   const nf = await fetch(`${BASE}/painel/envio/nope`); assert(nf.status === 404 && (await nf.text()).includes("Envio não encontrado"), "unknown id");
   await ctx.close();
+});
+await check("ui: a message finished by the hourly sweep opens in the panel like any other", async () => {
+  assert(sweptId, "no swept message");
+  const t = await shot("sweep-finished", `/painel/envio/${sweptId}`, { width: 1440, height: 900 });
+  assert(t.includes("Sweep Teste") && t.includes("organiza a semana"), `detail: ${t.slice(0, 200)}`);
 });
 await check("ui: panel detail at phone width has no horizontal scroll", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx); const p = await ctx.newPage();
