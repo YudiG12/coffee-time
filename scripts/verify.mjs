@@ -189,7 +189,7 @@ await check("ui: recording stops by itself at the limit (dev-only ?max=3)", asyn
   await ctx.close();
 });
 // Double click while the microphone prompt is open must start one recorder only, and Stop must release the mic.
-await check("ui: double click on record starts one recording and stop releases the microphone", async () => {
+await check("ui: double click on record starts one recording, tabs lock, stop releases the microphone, mic loss keeps the length", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["microphone"] }); await offline(ctx);
   await ctx.addInitScript(() => {
     const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -199,6 +199,7 @@ await check("ui: double click on record starts one recording and stop releases t
   const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
   await p.goto(BASE + "/", { waitUntil: "networkidle" });
   await p.evaluate(() => { const b = document.getElementById("record"); b.click(); b.click(); b.click(); });
+  assert(await p.locator("#tab-video").isDisabled(), "tabs not locked while the microphone prompt is open");
   await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
   await p.waitForTimeout(1200); await p.click("#stop");
   await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
@@ -206,6 +207,13 @@ await check("ui: double click on record starts one recording and stop releases t
   const r = await p.evaluate(() => ({ calls: window.__calls, live: window.__streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length }));
   assert(r.calls === 1, `getUserMedia called ${r.calls} times`);
   assert(r.live === 0, `${r.live} microphone track(s) still live after stop`);
+  // Microphone goes away mid-recording (device unplugged): the take must still get its real length.
+  await p.click("#redo"); await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+  await p.waitForTimeout(3000);
+  await p.evaluate(() => window.__streams.at(-1).getTracks().forEach((t) => t.stop()));
+  await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
+  const d = Number(await p.getAttribute("#ready", "data-duration"));
+  assert(d > 2.5 && d < 4.5, `duration after the microphone ended: ${d}`);
   await ctx.close();
 });
 await check("ui: panel lists messages with tags", async () => {

@@ -138,7 +138,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
  const fmt = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
  let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "", busy = false;
  // One recording at a time: lock the start controls while the microphone prompt is open.
- const lock = (on) => { busy = on; rec.disabled = on; $("redo").disabled = on; };
+ const lock = (on) => { busy = on; rec.disabled = on; $("redo").disabled = on; tabs.forEach((t) => (t.disabled = on)); };
  const setState = (s) => { main.dataset.state = s; tabs.forEach((t) => (t.disabled = s === "recording")); };
  const discard = () => { player.pause(); if (url) URL.revokeObjectURL(url); url = ""; $("ready").removeAttribute("data-duration"); setState("idle"); };
 
@@ -166,7 +166,9 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
   recorder = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined);
   chunks = [];
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  // Runs on Stop, on the time limit, and when the microphone goes away (device unplugged).
   recorder.onstop = () => {
+   clearInterval(tick); duration = elapsed();
    stream.getTracks().forEach((t) => t.stop());
    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
    url = URL.createObjectURL(blob); player.src = url;
@@ -181,7 +183,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
  };
  const stop = () => {
   if (!recorder || recorder.state === "inactive") return;
-  clearInterval(tick); duration = elapsed(); recorder.stop();
+  recorder.stop();
  };
 
  rec.addEventListener("click", () => { if (rec.dataset.kind === "audio") start(); });
