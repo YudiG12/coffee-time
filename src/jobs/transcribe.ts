@@ -42,9 +42,11 @@ export const cleanTags = (out: unknown): string[] => {
 };
 
 export const transcribe = async (env: Env, id: string) => {
-  const row = await env.DB.prepare("SELECT kind, media_key, audio_key, transcript FROM submissions WHERE id = ? AND status NOT IN ('uploading','rejected')")
-    .bind(id).first<{ kind: string; media_key: string | null; audio_key: string | null; transcript: string | null }>();
+  const row = await env.DB.prepare("SELECT status, kind, media_key, audio_key, transcript FROM submissions WHERE id = ? AND status != 'rejected'")
+    .bind(id).first<{ status: string; kind: string; media_key: string | null; audio_key: string | null; transcript: string | null }>();
   if (!row || row.transcript != null) return; // deleted, or already done (a queue may deliver twice)
+  // Send enqueues just before it commits: a job that beats the commit is retried, never dropped.
+  if (row.status === "uploading") throw new Error(`${id} not committed yet`);
   // Audio: the message itself. Video: its audio track from the browser (ADR 0003), else the video file.
   const key = row.audio_key || row.media_key;
   const obj = key ? await env.MEDIA.get(key) : null;

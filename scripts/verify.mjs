@@ -277,6 +277,21 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     assert(eq(t.cleanTags({ type: "Sugestão", topics: ["x".repeat(40)] }), ["Sugestão", "x".repeat(30)]), "one long word");
     assert(t.MAX_TAG === 30 && t.WHISPER.includes("whisper"), "constants");
   });
+  await check("api: a job that arrives before Send commits is retried, not dropped", async () => {
+    let status = "uploading", saved = null;
+    const DB = { prepare: (sql) => ({ bind: (...a) => ({
+      first: async () => ({ status, kind: "audio", media_key: "media/j1/media", audio_key: null, transcript: null }),
+      run: async () => { saved = a; return { meta: { changes: 1 } }; },
+    }) }) };
+    const MEDIA = { get: async () => ({ size: 4, arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer }) };
+    const AI = { run: async (model) => (model === t.WHISPER ? { text: " Olá  pessoal " } : { response: { type: "Dúvida", topics: ["Carreira"] } }) };
+    const env = { DB, MEDIA, AI, JOBS_RETRY_BASE_S: "0" };
+    const msg = () => { const m = { body: { id: "j1" }, attempts: 1, acked: false, retried: false, ack() { m.acked = true; }, retry() { m.retried = true; } }; return m; };
+    const early = msg(); await t.queue({ queue: t.JOBS_QUEUE, messages: [early] }, env);
+    assert(early.retried && !early.acked && saved === null, `early job: acked ${early.acked}, retried ${early.retried}`);
+    status = "new"; const late = msg(); await t.queue({ queue: t.JOBS_QUEUE, messages: [late] }, env);
+    assert(late.acked && saved?.[0] === "Olá pessoal" && saved?.[1] === JSON.stringify(["Dúvida", "Carreira"]), `committed job: ${JSON.stringify(saved)}`);
+  });
 }
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
@@ -300,7 +315,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway (originals kept until committed, retry works)", async () => {
+  await check("api: Send survives a storage error halfway or a queue outage (originals kept until committed, retry works)", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -328,10 +343,14 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     const retry = await send();
     assert(retry.status === 200 && row.status === "new" && row.media_key === "media/d1/media", `retry → ${retry.status}, status ${row.status}`);
     assert(jobs.length === 1 && jobs[0].id === "d1", `jobs after send: ${JSON.stringify(jobs)}`);
-    // A queue outage after the commit never loses the message.
+    // A queue outage never leaves a saved message without its job: nothing is committed (503), originals kept,
+    // and the browser's retry enqueues and commits.
     Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" }); for (const k of ["media", "photo-1", "photo-2"]) store.set(`incoming/d1/${k}`, store.get(`media/d1/${k}`));
-    JOBS.send = async () => { throw new Error("queue down"); };
-    const down = await send(); assert(down.status === 200 && row.status === "new", `send with the queue down → ${down.status}`);
+    const send2 = JOBS.send; JOBS.send = async () => { throw new Error("queue down"); };
+    const down = await send(); assert(down.status === 503 && row.status === "uploading", `send with the queue down → ${down.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`incoming/d1/${k}`)), `originals lost with the queue down: ${[...store.keys()].join(",")}`);
+    JOBS.send = send2; const back = await send();
+    assert(back.status === 200 && row.status === "new" && jobs.length === 2 && jobs[1].id === "d1", `retry after the queue outage → ${back.status}, status ${row.status}, jobs ${jobs.length}`);
     assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`) && !store.has(`incoming/d1/${k}`)), [...store.keys()].join(","));
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
