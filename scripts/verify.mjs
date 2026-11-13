@@ -552,7 +552,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
   for (const [vp, name, desktop] of [[{ width: 390, height: 844 }, "mobile", false], [{ width: 1440, height: 900 }, "desktop", true]]) {
     const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
     const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
-    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
     assert(!(await p.locator("#form").isVisible()), `${name}: form shown before there is media`);
     await p.setInputFiles("#file", FX.audio);
     await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
@@ -596,7 +596,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
 await check("ui: anonymous audio is saved without a name; a video has no Anonimizar voz and keeps the name", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
   const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
-  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.goto(BASE + "/?anon=1", { waitUntil: "networkidle" }); // dev-only: switch shown before #9
   await p.setInputFiles("#file", FX.video);
   await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
   assert(!(await p.locator("#anon").isVisible()) && (await p.locator("#name").isVisible()), "video: Anonimizar voz shown or name hidden");
@@ -609,6 +609,19 @@ await check("ui: anonymous audio is saved without a name; a video has no Anonimi
   assert((await p.locator("#thanks-text").innerText()).startsWith("Obrigado por mandar sua mensagem. "), `thanks text: ${await p.locator("#thanks-text").innerText()}`);
   const row = await mcpData("get_submission", { id });
   assert(row.anonymous === 1 && row.name === null && row.status === "new", JSON.stringify(row));
+  await ctx.close();
+});
+// The switch promises a distorted voice; until the distortion (#9) exists the real page must not offer it.
+await check("ui: without the voice distortion the page has no Anonimizar voz (name always shown)", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.audio);
+  await p.locator("#form").waitFor({ state: "visible", timeout: 8000 });
+  assert(await p.locator("#anon, .anon").count() === 0, "Anonimizar voz switch in the page");
+  assert(!/anonimiz|distorcid/i.test(await p.locator("body").innerText()), "page text promises a distorted voice");
+  assert(await p.locator("#name").isVisible(), "name hidden");
+  await p.screenshot({ path: `${OUT}/form-audio-default-mobile.png`, fullPage: true });
   await ctx.close();
 });
 await check("ui: Enviar waits for an upload still running, then sends", async () => {

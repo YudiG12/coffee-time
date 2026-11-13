@@ -27,7 +27,8 @@ const app = new Hono<{ Bindings: Env }>();
 app.get("/", (c) => {
   const host = new URL(c.req.url).hostname, dev = c.env.DEV_OPEN === "1" && (host === "localhost" || host === "127.0.0.1");
   const max = Number(c.req.query("max"));
-  return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90, c.env.TURNSTILE_SITE_KEY));
+  // Dev only: ?anon=1 shows "Anonimizar voz" before the voice distortion (#9) exists, so verify can test the switch.
+  return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90, c.env.TURNSTILE_SITE_KEY, dev && c.req.query("anon") === "1"));
 });
 app.get("/api/health", (c) => c.json({ ok: true }));
 registerDrafts(app);

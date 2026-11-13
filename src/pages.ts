@@ -42,7 +42,9 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // background, with the progress row of *-1c-video-ready.png ("Carregando vídeo 62%") and "Arquivo carregado" at the end.
 // Ready form (*-1-audio-ready.png): Anonimizar voz (audio only, hides the name), optional name, up to 10 photos, consent,
 // Enviar (only with media + consent). Send waits for the uploads, calls /api/drafts/:id/send, then shows *-2-thanks.png.
-export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<style>
+// `anonVoice`: the "Anonimizar voz" switch promises a distorted voice, which needs the browser-side distortion of
+// ADR 0003 (issue #9). Until that ships the switch is left out of the page; local dev can show it with ?anon=1.
+export const startPage = (max = 90, siteKey = "", anonVoice = false) => layout("Coffee Time", `<style>
 .start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
 .hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
 .hero img{width:96px;height:96px;flex-shrink:0;border-radius:14px;object-fit:cover;box-shadow:0 0 56px 14px rgba(224,163,90,.22)}
@@ -195,11 +197,11 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
   <div class="vmeta"><span id="vstatus">Vídeo pronto</span><button class="redo" id="vswap">Trocar vídeo</button></div>
  </div>
  <div class="form" id="form" data-anon="false">
-  <div class="panel anon">
+${anonVoice ? `  <div class="panel anon">
    <span class="anon-icon">${icon(MASK, 20)}</span>
    <div class="anon-text"><b id="anon-label">Anonimizar voz</b><span>O áudio fica distorcido e sua voz não é reconhecida.</span></div>
    <button class="switch" id="anon" role="switch" aria-checked="false" aria-labelledby="anon-label"><i></i></button>
-  </div>
+  </div>` : ""}
   <div class="field" id="name-field"><label for="name"><b>Nome</b> · opcional</label><input id="name" maxlength="60" autocomplete="name"></div>
   <div class="photos"><ul id="photo-list"></ul><button class="add" id="photo-add" aria-label="Adicionar fotos">${icon(PLUS, 18)}</button><span class="count" id="photo-count">0 / 10 fotos</span></div>
   <input type="file" id="photo-file" accept="image/*" multiple hidden>
@@ -240,7 +242,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  const file = $("file"), vplayer = $("vplayer");
  let recorder = null, stream = null, chunks = [], started = 0, tick = 0, duration = 0, url = "", busy = false, source = "record";
  // One recording or file at a time: lock the start controls while the microphone prompt is open or a file is read.
- const lock = (on) => { busy = on; ["record", "redo", "upload", "vswap", "anon", "photo-add", "name", "consent"].forEach((id) => ($(id).disabled = on)); tabs.forEach((t) => (t.disabled = on)); document.querySelectorAll(".photo button").forEach((b) => (b.disabled = on)); canSend(); };
+ const lock = (on) => { busy = on; ["record", "redo", "upload", "vswap", "anon", "photo-add", "name", "consent"].forEach((id) => $(id) && ($(id).disabled = on)); tabs.forEach((t) => (t.disabled = on)); document.querySelectorAll(".photo button").forEach((b) => (b.disabled = on)); canSend(); };
  const setState = (s) => { main.dataset.state = s; tabs.forEach((t) => (t.disabled = s === "recording")); canSend(); };
  // Enviar only with media and consent (and not while a send is running).
  const canSend = () => { $("send").disabled = busy || main.dataset.state !== "ready" || !main.dataset.media || !$("consent").checked; };
@@ -451,7 +453,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  $("photo-file").addEventListener("change", addPhotos);
 
  // ---- Anonimizar voz (audio only): hides the name field; the name is never sent while it is on.
- $("anon").addEventListener("click", () => { const on = $("anon").getAttribute("aria-checked") !== "true"; $("anon").setAttribute("aria-checked", String(on)); $("form").dataset.anon = String(on); });
+ if ($("anon")) $("anon").addEventListener("click", () => { const on = $("anon").getAttribute("aria-checked") !== "true"; $("anon").setAttribute("aria-checked", String(on)); $("form").dataset.anon = String(on); });
  $("consent").addEventListener("change", canSend);
 
  // ---- Send: wait for the media and the photos, then ask the Worker to check and keep them.
@@ -533,7 +535,7 @@ export const privacyPage = () => layout("Política de privacidade · Coffee Time
 <h2>O que eu guardo</h2>
 <ul>
  <li>O áudio ou vídeo que você envia e as fotos, se mandar alguma.</li>
- <li>Seu nome, se preencher. Com <b>Anonimizar voz</b>, o nome não é salvo.</li>
+ <li>Seu nome, se preencher.</li>
  <li>A data do envio e a data em que você deu a autorização.</li>
  <li>Uma transcrição automática da mensagem, para eu encontrar seu envio.</li>
 </ul>
