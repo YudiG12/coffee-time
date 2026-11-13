@@ -100,6 +100,9 @@ await check("api: the 6th draft in a minute from one IP → 429, other IPs unaff
   for (let i = 1; i <= 5; i++) { const r = await draft(b, ip); assert(r.status === 201, `draft ${i} → ${r.status}`); }
   const sixth = await draft(b, ip); assert(sixth.status === 429, `6th → ${sixth.status}`);
   const other = await draft(b); assert(other.status === 201, `other IP → ${other.status}`);
+  // Concurrent burst from a fresh IP: exactly 5 get through.
+  const burstIp = fakeIp(), codes = (await Promise.all(Array.from({ length: 20 }, () => draft(b, burstIp)))).map((r) => r.status);
+  assert(codes.filter((x) => x === 201).length === 5 && codes.filter((x) => x === 429).length === 15, `20 at once → ${codes.join(",")}`);
 });
 // Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
 {
@@ -412,6 +415,24 @@ await check("ui: a failed upload says so and \"Tentar de novo\" finishes it", as
   await p.screenshot({ path: `${OUT}/upload-error-mobile.png`, fullPage: true });
   fail = false; await p.click("#up-retry");
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await ctx.close();
+});
+await check("ui: swapping the file during a retry wait cancels the old upload for good", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); // the 503 below logs a console error on purpose
+  let first = null; const hits = {};
+  await p.route("**/api/drafts/*/media", (r) => {
+    const id = r.request().url().split("/").at(-2); first ??= id; hits[id] = (hits[id] || 0) + 1;
+    return id === first ? r.fulfill({ status: 503, body: "" }) : r.continue();
+  });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.audio);
+  await p.waitForFunction(() => document.getElementById("up").dataset.draft); await p.waitForTimeout(300); // first attempt failed, now waiting to retry
+  await p.setInputFiles("#file", FX.video);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await p.waitForTimeout(3500); // past both retry delays of the old upload
+  assert(hits[first] === 1, `canceled upload retried ${hits[first] - 1} time(s)`);
+  assert((await p.getAttribute("#up", "data-state")) === "done" && (await p.getAttribute("#up", "data-draft")) !== first, "replacement upload was disturbed");
   await ctx.close();
 });
 await check("ui: panel lists messages with tags", async () => {

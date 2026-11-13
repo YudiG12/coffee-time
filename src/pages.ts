@@ -301,7 +301,13 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
   x.send(body);
  });
  // Unstable 4G: each request (a whole small file or one 10 MB part) is retried up to 3 times.
- const retry = async (my, fn) => { for (let i = 0; ; i++) { try { return await fn(); } catch (e) { if (my !== job || i >= 2) throw e; await new Promise((r) => setTimeout(r, 1000 * (i + 1))); } } };
+ // A canceled job (file swapped, tab switched) never starts another request, not even a pending retry or the next part.
+ const retry = async (my, fn) => {
+  for (let i = 0; ; i++) {
+   if (my !== job) throw new Error("abort");
+   try { return await fn(); } catch (e) { if (my !== job || i >= 2) throw e; await new Promise((r) => setTimeout(r, 1000 * (i + 1))); }
+  }
+ };
  const upload = async (blob, kind, dur) => {
   cancelUpload(); const my = job; last = { blob, kind, dur };
   $("up-label").textContent = kind === "video" ? "Carregando vídeo" : "Carregando áudio"; progress(0); up.dataset.state = "uploading";
@@ -314,11 +320,12 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
    const d = await r.json(), u = d.upload; up.dataset.draft = d.id;
    if (u.mode === "multipart") {
     const tags = [];
-    for (let i = 0; i < u.parts.length; i++) {
+    for (let i = 0; i < u.parts.length && my === job; i++) {
      const part = blob.slice(i * u.part_size, (i + 1) * u.part_size);
      tags.push(await retry(my, () => send("PUT", u.parts[i], part, my, (n) => progress((i * u.part_size + n) / blob.size))));
     }
     const xml = "<CompleteMultipartUpload>" + tags.map((t, i) => "<Part><PartNumber>" + (i + 1) + "</PartNumber><ETag>" + t + "</ETag></Part>").join("") + "</CompleteMultipartUpload>";
+    if (my !== job) return;
     await retry(my, () => send("POST", u.complete, xml, my, null, "application/xml"));
    } else await retry(my, () => send("PUT", u.url, blob, my, (n) => progress(n / blob.size), type));
    if (my !== job) return;
