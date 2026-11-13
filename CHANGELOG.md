@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-13 · 🔒 **Transcript and free tags in the background** ([#20](https://github.com/YudiG12/coffee-time/pull/20) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-20))
 - 2026-11-13 · 🔒 **Voice distortion, video and photo compression in the browser** ([#19](https://github.com/YudiG12/coffee-time/pull/19) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-19))
 - 2026-11-13 · 🔒 **Send form, server check and thanks page** ([#18](https://github.com/YudiG12/coffee-time/pull/18) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-18))
 - 2026-11-13 · 🔒 **Create a draft and upload the media to R2 in the background** ([#17](https://github.com/YudiG12/coffee-time/pull/17) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-17))
