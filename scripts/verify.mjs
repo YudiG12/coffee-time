@@ -38,7 +38,9 @@ const serve = (port, vars) => {
 };
 const up = async (base) => { for (let i = 0; i < 60; i++) { try { if ((await fetch(base + "/api/health")).ok) return; } catch {} await wait(1000); } throw new Error("server did not start"); };
 
-const stop = serve(PORT, ["DEV_OPEN:1"]);
+// Cloudflare's Turnstile test keys (always pass); the Worker answers them offline in local dev.
+const TS_SITE = "1x00000000000000000000AA", TS_PASS = "1x0000000000000000000000000000000AA";
+const stop = serve(PORT, ["DEV_OPEN:1", `TURNSTILE_SITE_KEY:${TS_SITE}`, `TURNSTILE_SECRET:${TS_PASS}`]);
 await up(BASE);
 
 const api = async (path, init) => { const r = await fetch(BASE + path, { ...init, headers: { "content-type": "application/json", ...(init?.headers || {}) } }); return { status: r.status, body: await r.json().catch(() => null) }; };
@@ -67,12 +69,79 @@ await check("mcp: set_status updates and rejects bad values", async () => {
   const bad = await mcp("set_status", { id: "demo-3", status: "deleted" }); assert(bad.body?.result?.isError, "accepted invalid status");
 });
 
+// ---- Drafts and upload (ADR 0002). Each caller gets its own fake IP so the per-IP rate limit is tested in isolation.
+let ipN = 0; const fakeIp = () => (++ipN, `10.${(ipN >> 16) & 255}.${(ipN >> 8) & 255}.${ipN & 255}`);
+const draft = (body, ip = fakeIp(), base = BASE) => fetch(base + "/api/drafts", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip }, body: JSON.stringify(body) })
+  .then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+const r2get = (key) => { const f = `.verify/r2-${Date.now()}`; sh(`npx wrangler r2 object get "coffee-time-media/${key}" --local --persist-to ${STATE} --file ${f}`); return readFileSync(f); };
+const VIDEO_FX = readFileSync("scripts/fixtures/video-3s-1080p.webm");
+await check("api: draft + upload of a fixture lands in R2 incoming/<id>/ as `uploading`", async () => {
+  const d = await draft({ kind: "video", type: "video/webm", size: VIDEO_FX.length, duration: 3, token: "XXXX.DUMMY.TOKEN.XXXX" });
+  assert(d.status === 201 && d.body.upload.mode === "local", `draft → ${d.status} ${JSON.stringify(d.body)}`);
+  assert(d.body.key === `incoming/${d.body.id}/media` && d.body.expires_in <= 900, `key ${d.body.key}, expires ${d.body.expires_in}`);
+  const put = await fetch(BASE + d.body.upload.url, { method: "PUT", headers: { "content-type": "video/webm" }, body: VIDEO_FX });
+  assert(put.status === 200, `upload → ${put.status}`);
+  assert(r2get(d.body.key).equals(VIDEO_FX), "object in incoming/ differs from the fixture");
+  const row = await mcpData("get_submission", { id: d.body.id });
+  assert(row.status === "uploading" && row.kind === "video" && row.media_key === d.body.key && row.duration_s === 3, JSON.stringify(row));
+  assert(!(await api("/api/panel/submissions")).body.some((x) => x.id === d.body.id), "draft shows in the panel list");
+  assert((await fetch(BASE + "/api/drafts/nope/media", { method: "PUT", body: "x" })).status === 404, "upload to an unknown draft accepted");
+});
+await check("api: invalid drafts → 400 (kind, type, size 0, over 300 MB)", async () => {
+  for (const b of [{ kind: "photo", type: "image/png", size: 10 }, { kind: "audio", type: "video/webm", size: 10 }, { kind: "audio", type: "audio/wav", size: 0 }, { kind: "video", type: "video/mp4", size: 300 * 1024 * 1024 + 1 }]) {
+    const r = await draft({ ...b, token: "x" }); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`);
+  }
+});
+await check("api: draft without a valid Turnstile token → 403", async () => {
+  for (const token of [undefined, "", 42]) { const r = await draft({ kind: "audio", type: "audio/wav", size: 10, token }); assert(r.status === 403, `token ${JSON.stringify(token)} → ${r.status}`); }
+});
+await check("api: the 6th draft in a minute from one IP → 429, other IPs unaffected", async () => {
+  const ip = fakeIp(), b = { kind: "audio", type: "audio/wav", size: 10, token: "x" };
+  for (let i = 1; i <= 5; i++) { const r = await draft(b, ip); assert(r.status === 201, `draft ${i} → ${r.status}`); }
+  const sixth = await draft(b, ip); assert(sixth.status === 429, `6th → ${sixth.status}`);
+  const other = await draft(b); assert(other.status === 201, `other IP → ${other.status}`);
+});
+// Signing and Turnstile, tested directly on src/api/ (AWS's published SigV4 example; Turnstile siteverify stubbed).
+{
+  const js = execSync("npx esbuild --bundle --format=esm --log-level=error", { input: 'export * from "./src/api/drafts.ts"; export * from "./src/api/s3.ts";' }).toString();
+  const m = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+  await check("api: presigned URLs match AWS's SigV4 example; multipart URLs carry part, uploadId and ≤ 15 min", async () => {
+    const aws = { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", host: "examplebucket.s3.amazonaws.com", region: "us-east-1" };
+    const u = new URL(await m.presign(aws, "GET", "/test.txt", { expires: 86400, now: new Date("2013-05-24T00:00:00Z") }));
+    assert(u.searchParams.get("X-Amz-Signature") === "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404", `signature ${u.searchParams.get("X-Amz-Signature")}`);
+    const mp = await m.multipartUrls({ ...aws, host: "acc.r2.cloudflarestorage.com", region: "auto" }, "/coffee-time-media/incoming/x/media", "UP1", 3, m.URL_TTL);
+    assert(mp.parts.length === 3 && mp.parts.every((p, i) => { const q = new URL(p).searchParams; return q.get("partNumber") === String(i + 1) && q.get("uploadId") === "UP1" && Number(q.get("X-Amz-Expires")) <= 900; }), "part URLs");
+    assert(new URL(mp.complete).searchParams.get("uploadId") === "UP1" && !new URL(mp.complete).searchParams.has("partNumber"), "complete URL");
+    assert(m.PART_SIZE === 10 * 1024 * 1024 && m.URL_TTL <= 900, "part size / TTL");
+  });
+  await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
+    assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
+    assert(await m.checkTurnstile("", "1x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "empty token passed");
+    assert(await m.checkTurnstile("tok", undefined, "1.2.3.4", true) === false, "missing secret passed");
+    const realFetch = globalThis.fetch; let seen = null, reply = { success: false };
+    globalThis.fetch = async (u, init) => { seen = { u: String(u), f: Object.fromEntries(init.body) }; return new Response(JSON.stringify(reply)); };
+    try {
+      assert(await m.checkTurnstile("tok", "real-secret", "1.2.3.4", true) === false, "siteverify said no but passed");
+      assert(seen.u === "https://challenges.cloudflare.com/turnstile/v0/siteverify" && seen.f.secret === "real-secret" && seen.f.response === "tok" && seen.f.remoteip === "1.2.3.4", JSON.stringify(seen));
+      // Outside local dev even the test keys go to siteverify.
+      seen = null; reply = { success: true };
+      assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", false) === true && seen, "test key answered offline outside dev");
+    } finally { globalThis.fetch = realFetch; }
+  });
+}
+
 // ---- Screens ----
 const { chromium } = await import("playwright");
 // Fake microphone/camera with auto-accepted permission prompts, so recording can be tested headless.
 const browser = await chromium.launch({ args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] });
 // Offline-safe: external requests (Google Fonts) get an empty reply, so sandboxes without internet behave the same
-const offline = (ctx) => ctx.route((url) => !url.href.startsWith(BASE), (r) => r.fulfill({ status: 200, body: "" }));
+// Turnstile's script is replaced by a stub that hands out Cloudflare's dummy token. Each context gets its own fake IP.
+const TS_STUB = `window.turnstile={render(el,o){window.__tsKey=o.sitekey;setTimeout(()=>o.callback("XXXX.DUMMY.TOKEN.XXXX"),50);return "w"},remove(){},reset(){}};`;
+const offline = async (ctx) => {
+  await ctx.route((url) => !url.href.startsWith(BASE), (r) => r.fulfill({ status: 200, body: "" }));
+  await ctx.route("https://challenges.cloudflare.com/turnstile/**", (r) => r.fulfill({ status: 200, contentType: "text/javascript", body: TS_STUB }));
+  await ctx.setExtraHTTPHeaders({ "cf-connecting-ip": fakeIp() });
+};
 const errors = [];
 const shot = async (name, path, viewport) => {
   const ctx = await browser.newContext({ viewport }); await offline(ctx);
@@ -299,6 +368,52 @@ await check("ui: a file longer than 90 s (or not audio/video) is refused with a 
   assert(await p.locator("#vready[data-duration]").isVisible(), "a refused file discarded the video already chosen");
   await ctx.close();
 });
+// Background upload as in docs/design/*-1c-video-ready.png: "Carregando vídeo NN%", then "Arquivo carregado".
+await check("ui: a picked file uploads in the background (progress, Arquivo carregado, object in incoming/) (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    let release; const held = new Promise((r) => (release = r));
+    await p.route("**/api/drafts/*/media", async (r) => { await held; await r.continue(); });
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    assert((await p.content()).includes("challenges.cloudflare.com/turnstile/v0/api.js"), `${name}: Turnstile script missing`);
+    await p.setInputFiles("#file", FX.video);
+    await p.locator("#up[data-state=uploading][data-draft]").waitFor({ state: "visible", timeout: 8000 });
+    assert(await p.evaluate(() => window.__tsKey) === TS_SITE, `${name}: Turnstile rendered with ${await p.evaluate(() => window.__tsKey)}`);
+    const row = (await p.locator("#up").innerText()).replace(/\s+/g, " ");
+    assert(/Carregando vídeo \d+%/.test(row), `${name}: progress row: ${row}`);
+    await p.screenshot({ path: `${OUT}/upload-progress-${name}.png`, fullPage: true });
+    release();
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+    assert((await p.locator("#up").innerText()).trim() === "Arquivo carregado", `${name}: done text: ${await p.locator("#up").innerText()}`);
+    assert(!/\p{Extended_Pictographic}/u.test(await p.locator("body").innerText()), `${name}: emoji in the upload state`);
+    const id = await p.getAttribute("#up", "data-draft");
+    assert(r2get(`incoming/${id}/media`).equals(FX.video.buffer), `${name}: uploaded object differs from the file`);
+    await p.screenshot({ path: `${OUT}/upload-done-${name}.png`, fullPage: true });
+    // A recording uploads too, as a new draft.
+    await ctx.grantPermissions(["microphone"]);
+    await p.click("#tab-audio"); assert(!(await p.locator("#up").isVisible()), `${name}: upload row kept after discarding the video`);
+    await p.click("#record"); await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 }); await p.waitForTimeout(1200); await p.click("#stop");
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+    const id2 = await p.getAttribute("#up", "data-draft");
+    assert(id2 !== id && r2get(`incoming/${id2}/media`).length === Number(await p.getAttribute("#ready", "data-bytes")), `${name}: recording not uploaded`);
+    await ctx.close();
+  }
+});
+await check("ui: a failed upload says so and \"Tentar de novo\" finishes it", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
+  const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); // the 503s below log console errors on purpose
+  let fail = true; await p.route("**/api/drafts/*/media", (r) => (fail ? r.fulfill({ status: 503, body: "" }) : r.continue()));
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX.audio);
+  await p.locator("#up[data-state=error]").waitFor({ state: "visible", timeout: 15000 });
+  const t = (await p.locator("#up").innerText()).replace(/\s+/g, " ");
+  assert(t.includes("Não foi possível carregar o arquivo.") && t.includes("Tentar de novo"), `error text: ${t}`);
+  await p.screenshot({ path: `${OUT}/upload-error-mobile.png`, fullPage: true });
+  fail = false; await p.click("#up-retry");
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
+  await ctx.close();
+});
 await check("ui: panel lists messages with tags", async () => {
   const t = await shot("panel", "/painel", { width: 1440, height: 900 });
   assert(t.includes("Marina Souza") && t.includes("Kafka") && t.includes("Anônimo"), "rows missing");
@@ -343,6 +458,24 @@ await browser.close();
     assert((await get("/api/panel/submissions", { authorization: `Bearer ${TOKEN}` })) === 200, "panel api");
   });
   kill2();
+}
+// ---- Signed URLs: a third server with (fake) R2 S3 keys, so drafts get real presigned URLs. No request reaches R2.
+{
+  const P3 = await freePort(), B3 = `http://localhost:${P3}`;
+  const kill3 = serve(P3, ["DEV_OPEN:1", `TURNSTILE_SECRET:${TS_PASS}`, "R2_ACCESS_KEY_ID:verify-fake-key", `R2_SECRET_ACCESS_KEY:${randomBytes(16).toString("hex")}`]);
+  await up(B3);
+  await check("api: signed upload URL points at R2 incoming/<id>/ and expires in ≤ 15 min", async () => {
+    const t0 = Date.now(), d = await draft({ kind: "audio", type: "audio/webm", size: 50_000, token: "x" }, fakeIp(), B3);
+    assert(d.status === 201 && d.body.upload.mode === "single", `draft → ${d.status} ${JSON.stringify(d.body)}`);
+    const u = new URL(d.body.upload.url), q = u.searchParams;
+    assert(u.host === "337de6b8e4de301a53ecae0c06afcc72.r2.cloudflarestorage.com" && u.pathname === `/coffee-time-media/incoming/${d.body.id}/media`, `url ${u.host}${u.pathname}`);
+    const exp = Number(q.get("X-Amz-Expires")), at = Date.parse(q.get("X-Amz-Date").replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, "$1-$2-$3T$4:$5:$6Z"));
+    assert(exp > 0 && exp <= 900, `X-Amz-Expires ${exp}`);
+    assert(Math.abs(at - t0) < 60_000, `X-Amz-Date ${q.get("X-Amz-Date")}`);
+    assert(/^[0-9a-f]{64}$/.test(q.get("X-Amz-Signature") || "") && q.get("X-Amz-Credential").startsWith("verify-fake-key/"), "signature / credential");
+    assert((await fetch(B3 + `/api/drafts/${d.body.id}/media`, { method: "PUT", body: "x" })).status === 404, "Worker upload route open while S3 keys are set");
+  });
+  kill3();
 }
 // Access JWT signature, tested directly on src/auth.ts with keys made here (the real JWKS fetch is stubbed).
 {

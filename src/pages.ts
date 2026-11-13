@@ -31,7 +31,9 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // Mobile stacks hero, card, vlog; desktop puts the hero and vlog on the left and the card on the right.
 // Audio recording (MediaRecorder, Opus): *-1b-recording.png, then *-1-audio-ready.png. `max` is the limit in seconds (90; shorter only in local dev).
 // "Envie um arquivo": one audio or video file up to `max` seconds; a video shows *-1c-video-ready.png (no anonymize option for video).
-export const startPage = (max = 90) => layout("Coffee Time", `<style>
+// Upload (ADR 0002): as soon as there is media, a draft is created (Turnstile token) and the file goes to R2 in the
+// background, with the progress row of *-1c-video-ready.png ("Carregando vídeo 62%") and "Arquivo carregado" at the end.
+export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<style>
 .start{min-height:100vh;display:grid;grid-template-areas:"hero" "card" "vlog";gap:24px;padding:24px 20px 40px;max-width:520px;margin:0 auto;align-content:start}
 .hero{grid-area:hero;display:flex;gap:14px;align-items:flex-start}
 .hero img{width:96px;height:96px;flex-shrink:0;border-radius:14px;object-fit:cover;box-shadow:0 0 56px 14px rgba(224,163,90,.22)}
@@ -80,6 +82,14 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 .dur{position:absolute;right:8px;bottom:8px;padding:3px 6px;border-radius:4px;background:rgba(23,18,14,.8);color:var(--ink);font:500 13px/1 "JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .vmeta{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:14px;padding:4px 0 0}
 .rec-error{color:var(--rec);font-size:14px;text-align:center;margin:12px 0 0}.rec-error.show{display:block}
+.up{display:none;margin-top:14px;font:500 13px/1.4 "JetBrains Mono",ui-monospace,monospace}.start[data-state="ready"] .up[data-state]{display:block}
+.up .row{display:flex;justify-content:space-between;align-items:center;gap:12px}.up-label{color:var(--accent)}.up-pct{color:var(--muted);font-variant-numeric:tabular-nums}
+.up .bar{margin-top:8px}.up .done,.up .failed{display:none}
+.up[data-state="done"] .row,.up[data-state="done"] .bar,.up[data-state="error"] .row,.up[data-state="error"] .bar{display:none}
+.up[data-state="done"] .done{display:flex;align-items:center;justify-content:center;gap:8px;color:#9DBF8A}.up .done i{width:7px;height:7px;border-radius:50%;background:#9DBF8A}
+.up[data-state="error"] .failed{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--rec);font-family:Onest,system-ui,sans-serif;font-size:14px}
+.up .failed .redo{padding:0;white-space:nowrap}
+.ts:empty{display:none}.ts{margin-top:12px;display:flex;justify-content:center}
 @media (min-width:1024px){
  .start{max-width:1292px;grid-template-columns:minmax(0,1fr) minmax(360px,460px);grid-template-areas:"hero card" "vlog card";column-gap:clamp(40px,5.5vw,80px);row-gap:40px;align-content:center;padding:48px 40px}
  .hero{gap:clamp(16px,1.7vw,24px)}.hero img{width:clamp(120px,11.8vw,170px);height:clamp(120px,11.8vw,170px);border-radius:18px;box-shadow:0 0 90px 24px rgba(224,163,90,.2)}
@@ -135,7 +145,14 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
   </div>
   <div class="vmeta"><span id="vstatus">Vídeo pronto</span><button class="redo" id="vswap">Trocar vídeo</button></div>
  </div>
-</section>
+ <div class="ts" id="ts"></div>
+ <div class="up" id="up" aria-live="polite">
+  <div class="row"><span class="up-label" id="up-label">Carregando áudio</span><span class="up-pct" id="up-pct">0%</span></div>
+  <div class="bar" role="progressbar" aria-label="Carregamento do arquivo" aria-valuemin="0" aria-valuemax="100"><span id="up-bar"></span></div>
+  <div class="done"><i></i>Arquivo carregado</div>
+  <div class="failed"><span id="up-error">Não foi possível carregar o arquivo.</span><button class="redo" id="up-retry">Tentar de novo</button></div>
+ </div>
+</section>${siteKey ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>` : ""}
 <section class="vlog">
  <div class="eyebrow">Como fica no vlog</div>
  <div class="row">
@@ -146,7 +163,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 </main>
 <script>
 (() => {
- const MAX = ${max};
+ const MAX = ${max}, SITE_KEY = ${JSON.stringify(siteKey).replace(/</g, "\\u003c")};
  const icons = { audio: ${JSON.stringify(icon(MIC, 22))}, video: ${JSON.stringify(icon(VIDEO, 22))}, play: ${JSON.stringify(PLAY.replace('width="14" height="14"', 'width="18" height="18"'))}, pause: ${JSON.stringify(PAUSE)} };
  const labels = { audio: "Gravar áudio", video: "Gravar vídeo" };
  const $ = (id) => document.getElementById(id);
@@ -161,6 +178,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
   player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src");
   if (url) URL.revokeObjectURL(url); url = "";
   $("ready").removeAttribute("data-duration"); $("vready").removeAttribute("data-duration"); delete main.dataset.media; setState("idle");
+  cancelUpload();
  };
  const fail = (msg) => { err.textContent = msg; err.classList.add("show"); };
  const select = (kind) => {
@@ -201,6 +219,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
    $("ready-bar").style.width = (duration / MAX) * 100 + "%";
    Object.assign($("ready").dataset, { duration: duration.toFixed(2), bytes: String(blob.size), type: blob.type, source: "record" });
    main.dataset.media = "audio"; setState("ready");
+   upload(blob, "audio", duration);
   };
   recorder.start(250); lock(false);
   started = performance.now(); $("timer").textContent = "0:00"; setState("recording");
@@ -252,7 +271,65 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
    Object.assign($("vready").dataset, data, { height: String(meta.height) });
   }
   main.dataset.media = kind; setState("ready");
+  upload(f, kind, duration);
  };
+
+ // ---- Background upload: draft (Turnstile) → signed URL(s) → R2 incoming/<id>/ ----
+ const up = $("up");
+ let job = 0, xhr = null, last = null;
+ const cancelUpload = () => { job++; if (xhr) xhr.abort(); xhr = null; delete up.dataset.state; delete up.dataset.draft; };
+ const progress = (p) => { const v = Math.max(0, Math.min(100, Math.floor(p * 100))); $("up-pct").textContent = v + "%"; $("up-bar").style.width = v + "%"; up.querySelector("[role=progressbar]").setAttribute("aria-valuenow", String(v)); };
+ // One fresh Turnstile token per draft (tokens are single use). Interaction-only: the widget shows only if a check is needed.
+ let widget = null;
+ const turnstileToken = () => new Promise((ok, no) => {
+  if (!SITE_KEY) return ok("");
+  let waited = 0;
+  const go = () => {
+   if (!window.turnstile) return (waited += 200) > 15000 ? no(new Error("turnstile")) : setTimeout(go, 200);
+   if (widget !== null) { try { window.turnstile.remove(widget); } catch {} }
+   widget = window.turnstile.render("#ts", { sitekey: SITE_KEY, appearance: "interaction-only", callback: ok, "error-callback": () => no(new Error("turnstile")) });
+  };
+  go();
+ });
+ const send = (method, url, body, my, onp, type) => new Promise((ok, no) => {
+  const x = (xhr = new XMLHttpRequest());
+  x.open(method, url);
+  if (type) x.setRequestHeader("content-type", type);
+  x.upload.onprogress = (e) => my === job && onp && onp(e.loaded);
+  x.onload = () => (x.status >= 200 && x.status < 300 ? ok(x.getResponseHeader("etag")) : no(new Error("status " + x.status)));
+  x.onerror = () => no(new Error("network")); x.onabort = () => no(new Error("abort"));
+  x.send(body);
+ });
+ // Unstable 4G: each request (a whole small file or one 10 MB part) is retried up to 3 times.
+ const retry = async (my, fn) => { for (let i = 0; ; i++) { try { return await fn(); } catch (e) { if (my !== job || i >= 2) throw e; await new Promise((r) => setTimeout(r, 1000 * (i + 1))); } } };
+ const upload = async (blob, kind, dur) => {
+  cancelUpload(); const my = job; last = { blob, kind, dur };
+  $("up-label").textContent = kind === "video" ? "Carregando vídeo" : "Carregando áudio"; progress(0); up.dataset.state = "uploading";
+  try {
+   const token = await turnstileToken(); if (my !== job) return;
+   const type = blob.type || kind + "/webm";
+   const r = await fetch("/api/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, type, size: blob.size, duration: dur, token }) });
+   if (my !== job) return;
+   if (!r.ok) throw new Error(r.status === 429 ? "rate" : "draft");
+   const d = await r.json(), u = d.upload; up.dataset.draft = d.id;
+   if (u.mode === "multipart") {
+    const tags = [];
+    for (let i = 0; i < u.parts.length; i++) {
+     const part = blob.slice(i * u.part_size, (i + 1) * u.part_size);
+     tags.push(await retry(my, () => send("PUT", u.parts[i], part, my, (n) => progress((i * u.part_size + n) / blob.size))));
+    }
+    const xml = "<CompleteMultipartUpload>" + tags.map((t, i) => "<Part><PartNumber>" + (i + 1) + "</PartNumber><ETag>" + t + "</ETag></Part>").join("") + "</CompleteMultipartUpload>";
+    await retry(my, () => send("POST", u.complete, xml, my, null, "application/xml"));
+   } else await retry(my, () => send("PUT", u.url, blob, my, (n) => progress(n / blob.size), type));
+   if (my !== job) return;
+   progress(1); up.dataset.state = "done";
+  } catch (e) {
+   if (my !== job) return;
+   $("up-error").textContent = e.message === "rate" ? "Muitas tentativas. Espere um minuto e tente de novo." : "Não foi possível carregar o arquivo.";
+   up.dataset.state = "error";
+  }
+ };
+ $("up-retry").addEventListener("click", () => last && upload(last.blob, last.kind, last.dur));
 
  rec.addEventListener("click", () => { if (rec.dataset.kind === "audio") start(); });
  $("stop").addEventListener("click", stop);

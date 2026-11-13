@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { safeEqual, verifyAccess } from "./auth";
 import { panelPage, startPage } from "./pages";
+import { registerDrafts } from "./api/drafts";
 
 export type Env = {
   DB: D1Database;
@@ -11,6 +12,11 @@ export type Env = {
   ACCESS_TEAM_DOMAIN?: string; // e.g. yourteam.cloudflareaccess.com
   ACCESS_AUD?: string;         // Access application AUD tag
   DEV_OPEN?: string;           // "1" only in local .dev.vars
+  TURNSTILE_SITE_KEY?: string; // public var (wrangler.jsonc)
+  TURNSTILE_SECRET?: string;   // secret
+  R2_ACCOUNT_ID?: string;      // public var (wrangler.jsonc)
+  R2_ACCESS_KEY_ID?: string;   // secret: R2 S3 API token, used only to sign upload URLs
+  R2_SECRET_ACCESS_KEY?: string; // secret
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -20,9 +26,10 @@ const app = new Hono<{ Bindings: Env }>();
 app.get("/", (c) => {
   const host = new URL(c.req.url).hostname, dev = c.env.DEV_OPEN === "1" && (host === "localhost" || host === "127.0.0.1");
   const max = Number(c.req.query("max"));
-  return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90));
+  return c.html(startPage(dev && Number.isInteger(max) && max >= 1 && max < 90 ? max : 90, c.env.TURNSTILE_SITE_KEY));
 });
 app.get("/api/health", (c) => c.json({ ok: true }));
+registerDrafts(app);
 
 // Owner and agent only.
 // - Agent: Authorization: Bearer AGENT_TOKEN.
