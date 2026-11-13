@@ -1080,7 +1080,8 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   assert(await p.locator("#photos img").count() === 2, "two photos expected");
   await p.click('#status button[data-status="favorite"]');
   assert(await until(async () => (await panelRow(id)).status === "favorite", 5000), "status not saved");
-  assert(await p.locator('#status button[aria-pressed="true"]').innerText() === "Favorito", "status switch not updated");
+  // D1 can show the change a moment before the page has handled the reply: wait for the switch itself.
+  assert(await until(async () => (await p.locator('#status button[aria-pressed="true"]').innerText()) === "Favorito", 5000), "status switch not updated");
   // Two removals clicked before the first save answers (saves slowed down here): both stick.
   await p.route(`**/api/panel/submissions/${id}`, async (r) => { await wait(600); await r.continue(); });
   const start = JSON.parse((await panelRow(id)).tags);
