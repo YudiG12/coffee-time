@@ -259,7 +259,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  // Enviar only with media and consent (and not while a send is running).
  const canSend = () => { $("send").disabled = busy || main.dataset.state !== "ready" || !main.dataset.media || !$("consent").checked; };
  const discard = () => {
-  player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src");
+  player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src"); vplayer.removeAttribute("poster"); delete $("vready").dataset.thumb;
   if (url) URL.revokeObjectURL(url); url = "";
   $("ready").removeAttribute("data-duration"); $("vready").removeAttribute("data-duration"); delete main.dataset.media; setState("idle");
   $("send-error").classList.remove("show");
@@ -579,6 +579,26 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  $("redo").addEventListener("click", () => { if (source === "file") return file.click(); discard(); start("audio"); });
  const vtoggle = () => (vplayer.paused ? vplayer.play() : vplayer.pause());
  $("vplay").addEventListener("click", vtoggle); vplayer.addEventListener("click", vtoggle);
+ // First frame as the preview: real browsers (Safari above all) show an empty box until play. On load the video
+ // seeks to ~0.1 s, which makes the browser decode and paint a frame, and that frame is also kept as the poster
+ // (a small JPEG from a canvas). The first play goes back to 0, so playing still starts from the beginning.
+ let thumbPending = false;
+ vplayer.addEventListener("loadedmetadata", () => {
+  thumbPending = true;
+  const d = vplayer.duration;
+  try { vplayer.currentTime = Number.isFinite(d) && d > 0 ? Math.min(0.1, d / 2) : 0.1; } catch {}
+ });
+ vplayer.addEventListener("seeked", () => {
+  if (!thumbPending || !vplayer.paused || !vplayer.videoWidth) return;
+  try {
+   const c = document.createElement("canvas"), w = Math.min(960, vplayer.videoWidth);
+   c.width = w; c.height = Math.round((vplayer.videoHeight / vplayer.videoWidth) * w) || 1;
+   c.getContext("2d").drawImage(vplayer, 0, 0, c.width, c.height);
+   vplayer.poster = c.toDataURL("image/jpeg", 0.8);
+  } catch {}
+  $("vready").dataset.thumb = "1";
+ });
+ vplayer.addEventListener("play", () => { if (thumbPending) { thumbPending = false; vplayer.currentTime = 0; } });
  vplayer.addEventListener("play", () => $("vframe").classList.add("playing"));
  vplayer.addEventListener("pause", () => $("vframe").classList.remove("playing"));
  $("play").addEventListener("click", () => (player.paused ? player.play() : player.pause()));

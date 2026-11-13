@@ -850,6 +850,53 @@ await check("ui: upload a short audio and a short video, see the ready state (mo
     await ctx.close();
   }
 });
+// The video preview shows its first frame before play (issue #28): seek to ~0.1 s on load + a canvas poster.
+// "Not blank" compares a screenshot of the preview with one where the <video> is hidden (only the brown box and the
+// play button): they must differ clearly. Then the first play starts from 0.
+const frameDiff = async (p) => {
+  const shot = async () => (await p.locator("#vframe").screenshot()).toString("base64");
+  const a = await shot();
+  await p.evaluate(() => (document.getElementById("vplayer").style.visibility = "hidden"));
+  const b = await shot();
+  await p.evaluate(() => (document.getElementById("vplayer").style.visibility = ""));
+  return p.evaluate(async ([a, b]) => {
+    const px = async (s) => {
+      const img = await createImageBitmap(await (await fetch("data:image/png;base64," + s)).blob());
+      const c = document.createElement("canvas"); c.width = 64; c.height = 36;
+      const g = c.getContext("2d"); g.drawImage(img, 0, 0, 64, 36); return g.getImageData(0, 0, 64, 36).data;
+    };
+    const [x, y] = [await px(a), await px(b)];
+    let d = 0; for (let i = 0; i < x.length; i += 4) d += Math.abs(x[i] - y[i]) + Math.abs(x[i + 1] - y[i + 1]) + Math.abs(x[i + 2] - y[i + 2]);
+    return d / (x.length / 4) / 3;
+  }, [a, b]);
+};
+await check("ui: a picked or recorded video shows its first frame before play, and play starts from 0 (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    for (const how of ["file", "record"]) {
+      const ctx = await browser.newContext({ viewport: vp, permissions: ["microphone", "camera"] }); await offline(ctx);
+      const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+      await p.goto(BASE + "/", { waitUntil: "networkidle" });
+      if (how === "file") await p.setInputFiles("#file", FX.video);
+      else {
+        await p.click("#tab-video"); await p.click("#record");
+        await p.locator("#recorder[data-kind=video]").waitFor({ state: "visible", timeout: 5000 });
+        await p.waitForTimeout(2000); await p.click("#stop");
+      }
+      await p.locator("#vready[data-thumb='1']").waitFor({ state: "visible", timeout: 8000 });
+      const st = await p.evaluate(() => { const v = document.getElementById("vplayer"); return { paused: v.paused, t: v.currentTime, poster: v.poster.slice(0, 23), rs: v.readyState }; });
+      assert(st.paused && st.t > 0 && st.t <= 0.2 && st.rs >= 2, `${name}/${how}: preview not on its first frame ${JSON.stringify(st)}`);
+      assert(st.poster === "data:image/jpeg;base64,", `${name}/${how}: no poster from the first frame (${st.poster})`);
+      await p.waitForTimeout(200);
+      const diff = await frameDiff(p);
+      assert(diff > 8, `${name}/${how}: preview looks blank (mean difference ${diff.toFixed(1)} from the empty box)`);
+      await p.screenshot({ path: `${OUT}/video-thumbnail-${how}-${name}.png`, fullPage: true });
+      await p.click("#vplay"); await p.waitForTimeout(600);
+      const pl = await p.evaluate(() => { const v = document.getElementById("vplayer"); return { paused: v.paused, start: v.played.length ? v.played.start(0) : -1 }; });
+      assert(!pl.paused && pl.start >= 0 && pl.start < 0.05, `${name}/${how}: play did not start from the beginning ${JSON.stringify(pl)}`);
+      await ctx.close();
+    }
+  }
+});
 await check("ui: a file longer than 90 s (or not audio/video) is refused with a message", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
   const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
