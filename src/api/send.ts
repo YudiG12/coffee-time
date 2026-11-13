@@ -76,10 +76,11 @@ export const finishSend = async (env: SendEnv, draft: Draft, req: SendRequest): 
   const r = await db.prepare(`UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ?, send_request = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`)
     .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, JSON.stringify(photoKeys), id).run();
   if (!r.meta.changes) {
-    // Lost the draft meanwhile (sent by another request, or claimed by the sweep): drop the copies made above, unless
-    // the other request committed them as a message. The queued job finds no message and is acked.
-    const now = await db.prepare("SELECT status FROM submissions WHERE id = ?").bind(id).first<{ status: string }>().catch(() => null);
-    if (!now || now.status === "uploading" || now.status === "rejected") await bucket.delete(files.map((f) => f.to)).catch(() => {});
+    // Lost the draft meanwhile (sent by another request, or claimed by the sweep): drop the copies made above only
+    // once D1 says no message owns them (row gone, or still a draft). Status unknown (lookup failed) → keep them:
+    // a stray copy is junk, a deleted one could be another request's committed message.
+    const now = await db.prepare("SELECT status FROM submissions WHERE id = ?").bind(id).first<{ status: string }>().then((r) => ({ r }), () => null);
+    if (now && (!now.r || now.r.status === "uploading" || now.r.status === "rejected")) await bucket.delete(files.map((f) => f.to)).catch(() => {});
     return { status: 404, body: { error: "not found" } };
   }
   // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
