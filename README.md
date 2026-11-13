@@ -1,11 +1,15 @@
 <p align="center"><a href="https://www.youtube.com/@yudiganeko"><img src="docs/assets/banner.png" alt="Coffee Time: subscribers send a voice or video message, played in the vlog. A project by Yudi Ganeko" width="100%"></a></p>
 
-<p align="center"><img alt="Cloudflare Workers" src="https://img.shields.io/badge/runtime-Cloudflare_Workers-F38020?style=flat-square&labelColor=1B2632&logo=cloudflare&logoColor=white"> <img alt="Workers AI" src="https://img.shields.io/badge/AI-Whisper_%2B_tags-5A4BD1?style=flat-square&labelColor=1B2632"> <img alt="MCP" src="https://img.shields.io/badge/agent-MCP-2F8A5B?style=flat-square&labelColor=1B2632"> <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8A6A3F?style=flat-square&labelColor=1B2632"></a> <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3767A8?style=flat-square&labelColor=1B2632&logo=typescript&logoColor=white"></p>
+<p align="center"><a href="https://github.com/YudiG12/coffee-time/actions/workflows/ci.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/YudiG12/coffee-time/ci.yml?style=flat-square&label=tests&labelColor=1B2632"></a> <img alt="Cloudflare Workers" src="https://img.shields.io/badge/runtime-Cloudflare_Workers-F38020?style=flat-square&labelColor=1B2632&logo=cloudflare&logoColor=white"> <img alt="Workers AI" src="https://img.shields.io/badge/AI-Whisper_%2B_tags-5A4BD1?style=flat-square&labelColor=1B2632"> <img alt="MCP" src="https://img.shields.io/badge/agent-MCP-2F8A5B?style=flat-square&labelColor=1B2632"> <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8A6A3F?style=flat-square&labelColor=1B2632"></a> <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3767A8?style=flat-square&labelColor=1B2632&logo=typescript&logoColor=white"></p>
 
 **A site where subscribers send a short voice or video message to be played in the vlog's coffee segment, with an MCP server so AI agents can search the messages and download the media.** No account, optional voice anonymization, transcripts and tags generated in the background. The owner picks messages in a panel; his AI video editor finds them, reads the transcripts and pulls the files straight into the edit.
 
 <p align="center"><img src="docs/assets/hld-light.png" alt="High-level design: subscribers and the owner reach one Worker on Cloudflare, which keeps media in R2 and messages in D1, and uses Workers AI for transcripts and tags" width="720"></p>
 <p align="center"><sub>Details in <a href="ARCHITECTURE.md">ARCHITECTURE.md</a>.</sub></p>
+
+## Status
+
+In construction, built in the open by an agent pipeline: Claude picks the oldest [`agent` issue](https://github.com/YudiG12/coffee-time/issues?q=label%3Aagent), opens a PR with `npm run verify` proof (GIF and screenshots), Codex reviews it, and it merges and deploys on green. Every merged PR is a [release](https://github.com/YudiG12/coffee-time/releases) with what changed. "Deploy your own" comes when the v1 queue is done.
 
 ## For AI agents (MCP)
 
