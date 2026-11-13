@@ -160,6 +160,8 @@ await check("ui: record audio with a fake microphone, stop, ready, re-record (mo
     assert(Number(d.bytes) > 1000 && /opus|webm|ogg|mp4/.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
     assert((await p.locator("#ready-time").innerText()).trim() === "0:03", `${name}: ready time ${await p.locator("#ready-time").innerText()}`);
     await p.screenshot({ path: `${OUT}/ready-${name}.png`, fullPage: true });
+    await p.click("#tab-audio");
+    assert(await p.locator("#ready[data-duration]").isVisible(), `${name}: clicking the selected Áudio tab discarded the recording`);
     await p.click("#play"); await p.waitForTimeout(600);
     assert(await p.evaluate(() => { const a = document.getElementById("player"); return !a.paused && a.currentTime > 0; }), `${name}: playback did not start`);
     await p.click("#play");

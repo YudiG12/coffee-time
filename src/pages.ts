@@ -144,6 +144,7 @@ export const startPage = (max = 90) => layout("Coffee Time", `<style>
 
  tabs.forEach((t) => t.addEventListener("click", () => {
   const kind = t.dataset.kind;
+  if (kind === rec.dataset.kind) return; // already selected: keep the recording
   if (main.dataset.state === "ready") discard();
   tabs.forEach((x) => x.setAttribute("aria-selected", String(x === t)));
   rec.dataset.kind = kind;
