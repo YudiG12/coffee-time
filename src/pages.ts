@@ -563,16 +563,101 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 })();
 </script>`);
 
-type Row = { id: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; transcript_error?: string | null; tags: string };
+type Row = { id: string; created_at: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; transcript_error?: string | null; tags: string; photos?: number };
+type PanelOpts = { counts: Record<string, number>; tags: string[]; filter: { status: string; tag: string; q: string }; user: string; now?: number };
 const STATUS: Record<string, string> = { uploading: "Enviando", new: "Novo", favorite: "Favorito", used: "Usado", rejected: "Rejeitado" };
-export const panelPage = (rows: Row[]) => layout("Coffee Time · Painel", `<main class="wrap">
-<div class="eyebrow">Painel</div><h1 style="font-size:36px;font-weight:800;letter-spacing:-.03em;margin:4px 0 20px">Envios</h1>
-<ul style="list-style:none;padding:0;margin:0" id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" style="display:flex;gap:20px;padding:16px;border-bottom:1px solid var(--line)">
- <div style="width:200px;flex-shrink:0"><b>${esc(r.anonymous ? "Anônimo" : r.name || "Sem nome")}</b><div style="color:var(--subtle);font-size:13px">${esc(r.kind === "video" ? "vídeo" : "áudio")}</div></div>
- <div style="flex:1;color:var(--ink2)">${r.transcript ? `“${esc(r.transcript)}”` : `<i style="color:var(--subtle)">${r.transcript == null && !r.transcript_error && r.status !== "rejected" ? "Transcrevendo…" : "Sem transcrição"}</i>`}
-  <div style="margin-top:8px">${(JSON.parse(r.tags) as string[]).map((t) => `<span class="pill">${esc(t)}</span>`).join("")}</div></div>
- <div style="width:96px;flex-shrink:0;color:var(--accent);font-size:13px;font-weight:600">${esc(STATUS[r.status] || r.status)}</div></li>`).join("")}</ul>
+const TABS: [string, string][] = [["new", "Novos"], ["favorite", "Favoritos"], ["used", "Usados"], ["", "Todos"]];
+const SEARCH = `<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>`;
+// The first tag is the message type (ADR 0004); a few get their own color, the rest use caramel.
+const TYPE_TONE: Record<string, string> = { "História": "green", "Elogio": "green", "Crítica": "red" };
+const TZ = "America/Sao_Paulo";
+const MONTHS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
+
+// "agora", "hoje, 09:14", "ontem, 22:41" or "10 nov" (owner's time zone). created_at is UTC from D1.
+export const when = (createdAt: string, now = Date.now()) => {
+  const t = Date.parse(createdAt.replace(" ", "T") + "Z");
+  if (!Number.isFinite(t)) return "";
+  if (now - t < 60_000) return "agora";
+  const parts = (ms: number) => Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: TZ, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(ms).map((p) => [p.type, p.value]));
+  const d = parts(t), day = (x: Record<string, string>) => `${x.year}-${x.month}-${x.day}`, hm = `${d.hour}:${d.minute}`;
+  if (day(d) === day(parts(now))) return `hoje, ${hm}`;
+  if (day(d) === day(parts(now - 86_400_000))) return `ontem, ${hm}`;
+  return `${Number(d.day)} ${MONTHS[Number(d.month) - 1]}`;
+};
+
+// Panel list: docs/design/panel-list.png. Status tabs with counts, tag chips, search in transcripts; filters are links.
+export const panelPage = (rows: Row[], o: PanelOpts) => {
+  const href = (f: { status?: string; tag?: string; q?: string }) => {
+    const p = new URLSearchParams(Object.entries({ ...o.filter, ...f }).filter(([, v]) => v) as [string, string][]).toString();
+    return esc(`/painel${p ? `?${p}` : ""}`);
+  };
+  const fresh = o.counts.new || 0;
+  const thumb = (r: Row) => r.photos
+    ? `<img class="thumb" src="/painel/foto/${encodeURIComponent(r.id)}" alt="" loading="lazy">`
+    : `<div class="thumb icon" data-kind="${r.kind === "video" ? "video" : "audio"}">${icon(r.kind === "video" ? VIDEO : MIC, 18)}</div>`;
+  const sub = (r: Row) => r.anonymous ? "voz distorcida"
+    : `${r.kind === "video" ? "vídeo" : "áudio"}${r.photos ? ` · <span class="photos">${r.photos} ${r.photos === 1 ? "foto" : "fotos"}</span>` : r.kind === "video" ? " · sem fotos" : ""}`;
+  const said = (r: Row) => {
+    if (!r.transcript) return `<i class="none">${r.transcript == null && !r.transcript_error && r.status !== "rejected" ? "Transcrevendo…" : "Sem transcrição"}</i>`;
+    const tags = JSON.parse(r.tags) as string[];
+    return `<p>“${esc(r.transcript)}”</p>${tags.length ? `<div class="tags">${tags.map((t, i) => `<a class="pill${i === 0 ? ` type ${TYPE_TONE[t] || ""}` : ""}" href="${href({ tag: t })}">${esc(t)}</a>`).join("")}</div>` : ""}`;
+  };
+  return layout("Coffee Time · Painel", `<style>
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 48px;height:54px;border-bottom:1px solid var(--line)}
+.top .brand{display:flex;align-items:baseline;gap:14px;font-weight:800;font-size:17px;letter-spacing:-.02em}.top .brand .eyebrow{color:var(--accent)}
+.top .who{color:var(--muted);font-size:14px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel{max-width:1440px;margin:0 auto;padding:40px 48px 64px}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap}
+.head h1{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:0}.head .fresh{margin:6px 0 0;color:var(--ink2);font-size:15px}.head .fresh b{font-weight:700}
+.search{display:flex;align-items:center;gap:10px;width:360px;max-width:100%;padding:0 14px;height:40px;border:1px solid var(--line2);border-radius:4px;background:var(--surface);color:var(--subtle)}
+.search input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--ink);font:inherit;font-size:14px}.search input::placeholder{color:var(--subtle)}
+.search:focus-within{border-color:var(--accent)}
+.filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:22px 0 18px}
+.tab{display:inline-flex;align-items:center;gap:6px;padding:0 12px;height:33px;border:1px solid var(--line2);border-radius:4px;color:var(--ink2);text-decoration:none;font-size:14px;font-weight:600}
+.tab span{color:var(--muted);font-weight:400}.tab[aria-current]{background:var(--ink);color:var(--on-accent);border-color:var(--ink)}.tab[aria-current] span{color:var(--on-accent)}
+.sep{width:1px;height:28px;background:var(--line2);margin:0 6px}
+.filters .eyebrow{font-size:10px;margin-right:2px}
+.chip{display:inline-flex;align-items:center;padding:0 10px;height:28px;border:1px solid var(--line2);border-radius:4px;color:var(--ink2);text-decoration:none;font-size:13px;font-weight:600}
+.chip[aria-current]{background:#4A3420;border-color:#4A3420;color:var(--accent)}
+.grid{display:grid;grid-template-columns:80px 220px minmax(0,1fr) 92px 130px 112px;column-gap:16px;align-items:center}
+.cols{padding:0 0 10px;border-bottom:1px solid var(--line)}.cols .eyebrow{font-size:10px}
+#submissions{list-style:none;padding:0;margin:0}
+#submissions li{padding:20px 16px;margin:0 -16px;border-bottom:1px solid var(--line)}#submissions li:hover{background:var(--surface)}
+.thumb{width:64px;height:64px;border-radius:4px;object-fit:cover;display:block;background:#2C221A}
+.thumb.icon{display:flex;align-items:center;justify-content:center;color:var(--accent);background:#3A2C1F;border:1px solid var(--line2)}
+.thumb.icon[data-kind=audio]{background:#221A14}
+.who b{display:block;font-size:15px;font-weight:700}.who small{color:var(--subtle);font-size:13px}.who .photos{color:#8FB2E0}
+.said p{margin:0;color:var(--ink2);font-size:15px;line-height:23px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.said .none{color:var(--subtle);font-style:normal;font-size:15px}
+.tags{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}.tags .pill{margin:0;text-decoration:none}
+.pill.type{background:#4A3420;border-color:#4A3420;color:var(--accent)}.pill.type.green{background:#2F3A22;border-color:#2F3A22;color:#C9DDA8}.pill.type.red{background:#4A2620;border-color:#4A2620;color:#F0B4A8}
+.dur{font:500 14px "JetBrains Mono",ui-monospace,monospace;color:var(--ink2)}.date{color:var(--muted);font-size:14px}
+.status{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;background:#4A3420;color:var(--accent)}
+.status.favorite{background:#5A2E26;color:#F2B6A6}.status.used{background:#2C221A;color:var(--muted)}.status.rejected{background:#2C221A;color:var(--subtle)}
+.empty{color:var(--subtle);padding:40px 0;text-align:center}
+@media (max-width:900px){.top{padding:0 16px}.panel{padding:28px 16px 48px}.cols{display:none}
+ .grid{grid-template-columns:64px minmax(0,1fr) auto;grid-template-areas:"t w s" "t x x" ". d d";row-gap:6px;align-items:start}
+ .grid>.c-t{grid-area:t}.grid>.c-w{grid-area:w}.grid>.c-x{grid-area:x}.grid>.c-s{grid-area:s}.grid>.c-u{grid-area:d}.grid>.c-d{display:none}
+ #submissions li{margin:0;padding:16px 0}}
+</style>
+<header class="top"><div class="brand">Coffee Time <span class="eyebrow">Painel</span></div><div class="who">${o.user ? `${esc(o.user)} · Access` : "local"}</div></header>
+<main class="panel">
+<div class="head"><div><h1>Envios</h1><p class="fresh" id="fresh"><b>${fresh}</b> ${fresh === 1 ? "envio novo" : "envios novos"}</p></div>
+<form class="search" action="/painel" role="search">${icon(SEARCH, 16)}<input type="search" name="q" value="${esc(o.filter.q)}" placeholder="Buscar nas transcrições" aria-label="Buscar nas transcrições">${o.filter.status ? `<input type="hidden" name="status" value="${esc(o.filter.status)}">` : ""}${o.filter.tag ? `<input type="hidden" name="tag" value="${esc(o.filter.tag)}">` : ""}</form></div>
+<nav class="filters" aria-label="Filtros">${TABS.map(([k, label]) => `<a class="tab" data-status="${k || "all"}" href="${href({ status: k })}"${o.filter.status === k ? ' aria-current="page"' : ""}>${label}${k ? ` <span>${o.counts[k] || 0}</span>` : ""}</a>`).join("")}
+${o.tags.length ? `<div class="sep"></div><span class="eyebrow">Tags</span>${o.tags.map((t) => `<a class="chip" data-tag="${esc(t)}" href="${href({ tag: o.filter.tag === t ? "" : t })}"${o.filter.tag === t ? ' aria-current="true"' : ""}>${esc(t)}</a>`).join("")}` : ""}</nav>
+<div class="grid cols" aria-hidden="true"><span></span><span class="eyebrow">Quem</span><span class="eyebrow">O que falou</span><span class="eyebrow">Duração</span><span class="eyebrow">Quando</span><span class="eyebrow">Status</span></div>
+${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" class="grid">
+ <div class="c-t">${thumb(r)}</div>
+ <div class="c-w who"><b>${esc(r.anonymous ? "Anônimo" : r.name || "Sem nome")}</b><small>${sub(r)}</small></div>
+ <div class="c-x said">${said(r)}</div>
+ <div class="c-d dur">${r.duration_s != null ? fmt(r.duration_s) : "–"}</div>
+ <div class="c-u date">${esc(when(r.created_at, o.now))}</div>
+ <div class="c-s"><span class="status ${esc(r.status)}">${esc(STATUS[r.status] || r.status)}</span></div></li>`).join("")}</ul>`
+    : `<ul id="submissions"></ul><p class="empty">Nenhum envio por aqui.</p>`}
 </main>`);
+};
 
 // Privacy page (ADR 0005): what is kept, why, and deletion by e-mail. Linked from the consent checkbox.
 export const privacyPage = () => layout("Política de privacidade · Coffee Time", `<style>
