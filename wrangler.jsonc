@@ -9,6 +9,17 @@
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "coffee-time-media" }
   ],
+  // Transcript and tags (ADR 0004): one job per submission; 3 retries with backoff (src/jobs/transcribe.ts), then the
+  // dead-letter queue, whose consumer only marks the message as not transcribed. Create both queues once:
+  // npx wrangler queues create coffee-time-jobs && npx wrangler queues create coffee-time-jobs-dlq
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "coffee-time-jobs" }],
+    "consumers": [
+      { "queue": "coffee-time-jobs", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "coffee-time-jobs-dlq" },
+      { "queue": "coffee-time-jobs-dlq", "max_batch_size": 10 }
+    ]
+  },
+  "ai": { "binding": "AI" },
   // Public vars. keep_vars keeps the ones set in the dashboard (ACCESS_TEAM_DOMAIN, ACCESS_AUD) on deploy.
   "vars": { "TURNSTILE_SITE_KEY": "0x4AAAAAAF-1nui9upefCZ7a", "R2_ACCOUNT_ID": "337de6b8e4de301a53ecae0c06afcc72" },
   "keep_vars": true,

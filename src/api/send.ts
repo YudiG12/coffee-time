@@ -1,6 +1,7 @@
 // Send (ADR 0002): POST /api/drafts/:id/send turns an `uploading` draft into a message.
 // For every file in `incoming/<id>/` it checks the size (HEAD) and the real type (magic bytes of the first 4 KB),
 // (media, the audio track of a video when the browser sent one, photos), then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
+// Once committed it enqueues the transcript job on JOBS.
 // A file that fails the check deletes the draft's files and marks it `rejected`. A file not uploaded yet → 409.
 import type { Hono } from "hono";
 import type { Env } from "../index";
@@ -79,6 +80,9 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     // Committed: now drop the originals (and photos removed before Send). A failure here only leaves junk in
     // incoming/, never a broken message.
     await deleteIncoming(bucket, id).catch(() => {});
+    // Transcript and tags in the background (ADR 0004). If enqueueing fails the message is still saved and shows
+    // "Transcrevendo…" until a later job picks it up.
+    await c.env.JOBS.send({ id }).catch((e) => console.log(`enqueue ${id} failed: ${e?.message || e}`));
     return c.json({ id, status: "new", name }, 200);
   });
 };
