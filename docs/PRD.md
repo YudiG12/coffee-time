@@ -13,7 +13,7 @@ The owner (a dev YouTuber, ~120k subscribers) wants a "coffee" segment in his vl
 ### Send (public site, Portuguese)
 Screens: [docs/design/](design/) (`mobile-*`, `desktop-*`).
 1. **Start**: only the choice Audio / Video, a big **Gravar áudio** button and **Envie um arquivo**. Hint: "Áudio ou vídeo de até 90 segundos." Below: "Como fica no vlog" (placeholder until real clips exist).
-2. **Recording**: pulsing mic, large timer, "máximo de 90 segundos", stop button. Stops by itself at 90 s.
+2. **Recording**: pulsing mic, large timer, "máximo de 90 segundos", stop button. Stops by itself at 90 s. On the Vídeo tab, "Gravar vídeo" asks for camera + microphone and shows the live camera instead of the mic; the take ends in the same "Vídeo pronto" state as an uploaded video, with "Regravar".
 3. **Ready** (only after a recording or file exists):
    - audio: play/re-record; **Anonimizar voz** toggle ("O áudio fica distorcido e sua voz não é reconhecida.");
    - video: preview, "Trocar vídeo"; no anonymous option;
