@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-13 · 🔒 **Keep the R2 CORS rule in the repo and apply it on every deploy** ([#26](https://github.com/YudiG12/coffee-time/pull/26) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-26))
 - 2026-11-13 · 🔒 **Hourly sweep: finish unconfirmed sends, delete old drafts and failed sends** ([#23](https://github.com/YudiG12/coffee-time/pull/23) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-23))
 - 2026-11-13 · 🔒 **Panel detail, zip download, delete and MCP download links** ([#22](https://github.com/YudiG12/coffee-time/pull/22) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-22))
 - 2026-11-13 · 🔒 **Panel list as in the design** ([#21](https://github.com/YudiG12/coffee-time/pull/21) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-21))
