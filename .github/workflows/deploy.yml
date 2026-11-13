@@ -24,6 +24,7 @@ jobs:
       - run: npx wrangler r2 bucket cors set coffee-time-media --file r2-cors.json --force
       - id: deploy
         run: |
+          set -o pipefail  # without it, tee hides a failed deploy
           npm run deploy 2>&1 | tee deploy.log
           echo "url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)" >> "$GITHUB_OUTPUT"
       # Smoke test on production: the bindings the app needs really work (local verify simulates them).
@@ -32,7 +33,8 @@ jobs:
           url="${{ steps.deploy.outputs.url }}"
           [ -n "$url" ] || { echo "no workers.dev URL in the deploy output"; exit 1; }
           for i in 1 2 3 4 5; do
-            body=$(curl -fsS "$url/api/health?deep=1") && { echo "$body"; exit 0; }
+            # the old version answers /api/health too: require the deep fields so a stale deploy fails
+            body=$(curl -fsS "$url/api/health?deep=1") && echo "$body" | grep -q '"jobs"' && { echo "$body"; exit 0; }
             sleep 6
           done
           echo "health failed: $(curl -sS "$url/api/health?deep=1")"; exit 1
