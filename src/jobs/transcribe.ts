@@ -24,11 +24,9 @@ const base64 = (bytes: Uint8Array) => {
   return btoa(s);
 };
 
-// Model output → clean tag list: type first, then topics; trimmed, ≤ 30 chars on a word boundary, no duplicates (case-insensitive).
-export const cleanTags = (out: unknown): string[] => {
-  let v: any = out;
-  if (typeof v === "string") { try { v = JSON.parse(v.slice(v.indexOf("{"), v.lastIndexOf("}") + 1)); } catch { v = null; } }
-  const raw = [v?.type, ...(Array.isArray(v?.topics) ? v.topics : [])];
+// A tag list → clean tags: trimmed, ≤ 30 chars on a word boundary, no duplicates (case-insensitive), at most `max`.
+// Also used for the tags the owner edits in the panel.
+export const cleanTagList = (raw: unknown[], max: number): string[] => {
   const seen = new Set<string>(), tags: string[] = [];
   for (const t of raw) {
     if (typeof t !== "string") continue;
@@ -36,9 +34,15 @@ export const cleanTags = (out: unknown): string[] => {
     if (tag.length > MAX_TAG) { const cut = tag.slice(0, MAX_TAG + 1); tag = (cut.includes(" ") ? cut.slice(0, cut.lastIndexOf(" ")) : cut.slice(0, MAX_TAG)).trim(); } // whole words
     if (!tag || seen.has(tag.toLowerCase())) continue;
     seen.add(tag.toLowerCase()); tags.push(tag);
-    if (tags.length === MAX_TAGS) break;
+    if (tags.length === max) break;
   }
   return tags;
+};
+// Model output → clean tag list: type first, then topics.
+export const cleanTags = (out: unknown): string[] => {
+  let v: any = out;
+  if (typeof v === "string") { try { v = JSON.parse(v.slice(v.indexOf("{"), v.lastIndexOf("}") + 1)); } catch { v = null; } }
+  return cleanTagList([v?.type, ...(Array.isArray(v?.topics) ? v.topics : [])], MAX_TAGS);
 };
 
 export const transcribe = async (env: Env, id: string) => {

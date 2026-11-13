@@ -8,6 +8,7 @@ import { spawn, execSync } from "node:child_process";
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
+import zlib from "node:zlib";
 
 const freePort = () => new Promise((r) => { const s = createServer().listen(0, () => { const p = s.address().port; s.close(() => r(p)); }); });
 const PORT = await freePort();
@@ -101,6 +102,10 @@ const wav = (sec, rate = 8000) => {
   return b;
 };
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+// demo-1's audio and demo-3's video (scripts/demo-seed.sql), for the panel detail.
+writeFileSync(".verify/demo-1.wav", wav(4));
+sh(`npx wrangler r2 object put "coffee-time-media/media/demo-1/media" --local --persist-to ${STATE} --file .verify/demo-1.wav --content-type audio/wav`);
+sh(`npx wrangler r2 object put "coffee-time-media/media/demo-3/media" --local --persist-to ${STATE} --file scripts/fixtures/video-3s-1080p.webm --content-type video/webm`);
 const r2has = (key) => { try { execSync(`npx wrangler r2 object get "coffee-time-media/${key}" --local --persist-to ${STATE} --pipe`, { stdio: "ignore" }); return true; } catch { return false; } };
 await check("api: draft + upload of a fixture lands in R2 incoming/<id>/ as `uploading`", async () => {
   const d = await draft({ kind: "video", type: "video/webm", size: VIDEO_FX.length, duration: 3, token: "XXXX.DUMMY.TOKEN.XXXX" });
@@ -365,6 +370,84 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     } finally { globalThis.fetch = realFetch; }
   });
 }
+
+// ---- Panel detail (docs/design/panel-detail.png): status, tags, files, zip, delete; MCP download URLs.
+// A stored ZIP read from its central directory; every file's CRC is checked against its bytes.
+const unzip = (z) => {
+  const eocd = z.length - 22; assert(z.readUInt32LE(eocd) === 0x06054b50, "zip: no end record");
+  const out = {}; let at = z.readUInt32LE(eocd + 16);
+  for (let i = 0; i < z.readUInt16LE(eocd + 10); i++) {
+    assert(z.readUInt32LE(at) === 0x02014b50, "zip: bad central header");
+    const crc = z.readUInt32LE(at + 16), size = z.readUInt32LE(at + 20), n = z.readUInt16LE(at + 28), off = z.readUInt32LE(at + 42), name = z.toString("utf8", at + 46, at + 46 + n);
+    assert(z.readUInt32LE(off) === 0x04034b50, `zip: bad local header for ${name}`);
+    const start = off + 30 + z.readUInt16LE(off + 26) + z.readUInt16LE(off + 28), data = z.subarray(start, start + size);
+    assert(zlib.crc32(data) === crc, `zip: CRC of ${name}`);
+    out[name] = data; at += 46 + n;
+  }
+  return out;
+};
+const sendFull = async (name, audio = wav(2), photos = [PNG, PNG]) => {
+  const d = await newDraft("audio", audio, "audio/wav");
+  assert((await putFile(d.upload.url, audio, "audio/wav")) === 200, "upload failed");
+  for (let i = 0; i < photos.length; i++) await addPhoto(d.id, i + 1, photos[i]);
+  const r = await post(`/api/drafts/${d.id}/send`, { consent: true, name, photos: photos.map((_, i) => i + 1) }); assert(r.status === 200, `send → ${r.status}`);
+  assert(await until(async () => (await panelRow(d.id))?.transcript != null, 30000), "never transcribed");
+  return { id: d.id, audio };
+};
+const del = (path, headers = {}) => fetch(BASE + path, { method: "DELETE", headers }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+let detailMsg = null;
+await check("api: panel detail saves status and tags (cleaned), refuses bad values and other origins", async () => {
+  detailMsg = await sendFull("Bia Detalhe"); const { id } = detailMsg, path = `/api/panel/submissions/${id}`;
+  const s = await post(path, { status: "used" }); assert(s.status === 200 && s.body.status === "used", `status → ${s.status} ${JSON.stringify(s.body)}`);
+  assert((await panelRow(id)).status === "used", "status not saved");
+  const t = await post(path, { tags: ["  Dúvida ", "Idempotência", "idempotência", "", 7, "x".repeat(40), "Carreira"] });
+  assert(t.status === 200 && JSON.stringify(t.body.tags) === JSON.stringify(["Dúvida", "Idempotência", "x".repeat(30), "Carreira"]), `tags → ${JSON.stringify(t.body)}`);
+  assert(JSON.stringify(JSON.parse((await panelRow(id)).tags)) === JSON.stringify(t.body.tags) && (await panelRow(id)).status === "used", "tags not saved (or status lost)");
+  for (const b of [{ status: "deleted" }, { status: "rejected" }, { tags: "Kafka" }, {}]) { const r = await post(path, b); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`); }
+  assert((await post("/api/panel/submissions/nope", { status: "favorite" })).status === 404, "unknown id accepted");
+  const cross = await api(path, { method: "POST", headers: { origin: "https://evil.example" }, body: JSON.stringify({ status: "favorite" }) });
+  assert(cross.status === 403 && (await panelRow(id)).status === "used", `other origin → ${cross.status}`);
+  assert((await del(path, { origin: "https://evil.example" })).status === 403 && await panelRow(id), "delete from another origin");
+});
+await check("api: panel files are served from R2 with the type from the bytes and Range for the player", async () => {
+  const { id, audio } = detailMsg;
+  const m = await fetch(`${BASE}/painel/arquivo/${id}/media`);
+  assert(m.status === 200 && m.headers.get("content-type") === "audio/wav" && Buffer.from(await m.arrayBuffer()).equals(audio), `media → ${m.status} ${m.headers.get("content-type")}`);
+  const part = await fetch(`${BASE}/painel/arquivo/${id}/media`, { headers: { range: "bytes=10-19" } });
+  assert(part.status === 206 && part.headers.get("content-range") === `bytes 10-19/${audio.length}` && Buffer.from(await part.arrayBuffer()).equals(audio.subarray(10, 20)), `range → ${part.status} ${part.headers.get("content-range")}`);
+  const ph = await fetch(`${BASE}/painel/arquivo/${id}/photo-2`);
+  assert(ph.status === 200 && ph.headers.get("content-type") === "image/png" && ph.headers.get("x-content-type-options") === "nosniff", `photo → ${ph.status}`);
+  for (const f of [`${id}/photo-3`, `${id}/audio`, `demo-2/media`, `nope/media`, `${id}/secret`]) { const st = (await fetch(`${BASE}/painel/arquivo/${f}`)).status; assert(st === 404, `${f} → ${st}`); }
+});
+await check("api: the zip has the media, the photos and the transcript", async () => {
+  const { id, audio } = detailMsg, r = await fetch(`${BASE}/painel/envio/${id}/arquivos.zip`);
+  assert(r.status === 200 && r.headers.get("content-type") === "application/zip" && /attachment; filename="coffee-time-[\w-]+\.zip"/.test(r.headers.get("content-disposition")), `zip → ${r.status} ${r.headers.get("content-disposition")}`);
+  const files = unzip(Buffer.from(await r.arrayBuffer()));
+  assert(JSON.stringify(Object.keys(files)) === JSON.stringify(["audio.wav", "foto-1.png", "foto-2.png", "transcricao.txt"]), `entries ${Object.keys(files)}`);
+  assert(files["audio.wav"].equals(audio) && files["foto-2.png"].equals(PNG), "zip files differ from the uploads");
+  const txt = files["transcricao.txt"].toString("utf8");
+  assert(txt.includes("Bia Detalhe") && txt.includes(STUB_TRANSCRIPT) && txt.includes("Dúvida, Idempotência"), `transcript: ${txt}`);
+  const v = unzip(Buffer.from(await (await fetch(`${BASE}/painel/envio/demo-3/arquivos.zip`)).arrayBuffer()));
+  assert(v["video.webm"]?.equals(VIDEO_FX) && v["transcricao.txt"].toString().includes("Lisboa"), `video zip: ${Object.keys(v)}`);
+  assert((await fetch(`${BASE}/painel/envio/nope/arquivos.zip`)).status === 404, "zip of an unknown id");
+});
+await check("mcp: get_submission returns working download URLs for the media and the photos", async () => {
+  const { id, audio } = detailMsg, d = await mcpData("get_submission", { id });
+  assert(d.downloads && d.downloads.media && d.downloads.photos.length === 2, JSON.stringify(d.downloads));
+  const m = await fetch(d.downloads.media); assert(m.ok && Buffer.from(await m.arrayBuffer()).equals(audio), `media url → ${m.status}`);
+  for (const u of d.downloads.photos) { const p = await fetch(u); assert(p.ok && Buffer.from(await p.arrayBuffer()).equals(PNG), `photo url → ${p.status}`); }
+  const tools = (await api("/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).body.result.tools;
+  assert(tools.find((t) => t.name === "get_submission").description.includes("downloads"), "tool description");
+});
+await check("api: Apagar envio deletes the R2 objects and the row", async () => {
+  const { id } = await sendFull("Apagar API", wav(1), [PNG]);
+  const keys = [`media/${id}/media`, `media/${id}/photo-1`]; for (const k of keys) assert(r2has(k), `${k} missing before`);
+  const r = await del(`/api/panel/submissions/${id}`); assert(r.status === 200 && r.body.ok, `delete → ${r.status} ${JSON.stringify(r.body)}`);
+  for (const k of keys) assert(!r2has(k), `${k} still in R2`);
+  assert(!(await panelRow(id)) && (await mcp("get_submission", { id })).body.result.isError, "row still there");
+  assert((await del(`/api/panel/submissions/${id}`)).status === 404, "second delete");
+  assert((await fetch(`${BASE}/painel/envio/${id}`)).status === 404, "detail of a deleted message");
+});
 
 // ---- Screens ----
 const { chromium } = await import("playwright");
@@ -945,6 +1028,77 @@ await check("ui: panel says \"Transcrevendo…\" before the job runs, then the t
   assert(rejected && (await rowText(rejected.id)).includes("Sem transcrição"), "a rejected message says Transcrevendo…");
   await shot("panel-transcribed", "/painel", { width: 1440, height: 900 });
 });
+// docs/design/panel-detail.png: back link, name + meta, player, transcript, photos; status switch, tags, zip, delete.
+await check("ui: panel detail as in the design: player, transcript, photos, status switch, editable tags, zip download, delete with in-page confirmation", async () => {
+  const { id } = detailMsg;
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true }); await offline(ctx); const p = await ctx.newPage();
+  p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  let dialogs = 0; p.on("dialog", (d) => { dialogs++; d.dismiss(); });
+  // From the list: the name opens the detail.
+  await p.goto(BASE + "/painel", { waitUntil: "networkidle" });
+  await p.click('li[data-id="demo-1"] a.open'); await p.waitForLoadState("networkidle");
+  assert(new URL(p.url()).pathname === "/painel/envio/demo-1", `opened ${p.url()}`);
+  const head = await p.locator(".title").innerText();
+  assert(head.includes("Marina Souza") && /áudio 1:12 · 1 foto/.test(head) && /(hoje|ontem), \d\d:\d\d/.test(head), `title: ${head}`);
+  assert(await p.locator(".title img.thumb").evaluate((i) => (i.complete ? Promise.resolve() : new Promise((r) => { i.onload = i.onerror = r; })).then(() => i.naturalWidth > 0)), "header photo not shown");
+  assert((await p.locator("#transcript").innerText()).includes("idempotência"), "transcript missing");
+  assert(await p.locator("#bars i").count() > 20 && (await p.locator("#time").innerText()).includes("/"), "player bars or time missing");
+  // The player plays the stored audio and the bars follow it.
+  await p.click("#play");
+  assert(await until(async () => (await p.locator("#audio").evaluate((a) => a.currentTime)) > 0.5, 8000), "audio did not play");
+  assert(await p.locator("#bars i.on").count() > 0 && (await p.locator("#play").getAttribute("aria-label")) === "Pausar", "bars or button do not follow playback");
+  await p.click("#play");
+  assert(await p.locator("#photos img").count() === 1, "photos missing");
+  assert((await p.locator("#zip").innerText()).includes("Baixar arquivos (.zip)") && (await p.locator("#delete").innerText()) === "Apagar envio", "side buttons");
+  assert(!/\p{Extended_Pictographic}/u.test(await p.locator("body").innerText()), "emoji in the detail page");
+  await p.evaluate(() => document.getElementById("audio").currentTime = 1.5);
+  await p.waitForTimeout(300);
+  await p.screenshot({ path: `${OUT}/panel-detail.png`, fullPage: true });
+
+  // The message sent above (2 photos): status, tags, zip, delete.
+  await p.goto(`${BASE}/painel/envio/${id}`, { waitUntil: "networkidle" });
+  assert(await p.locator("#photos img").count() === 2, "two photos expected");
+  await p.click('#status button[data-status="favorite"]');
+  assert(await until(async () => (await panelRow(id)).status === "favorite", 5000), "status not saved");
+  assert(await p.locator('#status button[aria-pressed="true"]').innerText() === "Favorito", "status switch not updated");
+  await p.click('#tags .tag[data-tag="Idempotência"] button');
+  assert(await until(async () => !JSON.parse((await panelRow(id)).tags).includes("Idempotência"), 5000), "tag not removed");
+  await p.click("#add-tag"); await p.fill("#new-tag", "  Entrevista "); await p.press("#new-tag", "Enter");
+  assert(await until(async () => JSON.parse((await panelRow(id)).tags).includes("Entrevista"), 5000), "tag not added");
+  await p.locator('#tags .tag[data-tag="Entrevista"]').waitFor();
+  await p.click("#add-tag"); await p.fill("#new-tag", "Descartar"); await p.press("#new-tag", "Escape");
+  assert(!JSON.parse((await panelRow(id)).tags).includes("Descartar") && await p.locator("#add-tag").count() === 1, "Esc saved the tag");
+  await p.reload({ waitUntil: "networkidle" });
+  const tags = await p.locator("#tags .tag").evaluateAll((els) => els.map((e) => e.dataset.tag));
+  assert(JSON.stringify(tags) === JSON.stringify(JSON.parse((await panelRow(id)).tags)) && tags.includes("Entrevista"), `tags after reload: ${tags}`);
+  assert(await p.locator('#status button[data-status="favorite"][aria-pressed="true"]').count() === 1, "status after reload");
+  const [dl] = await Promise.all([p.waitForEvent("download"), p.click("#zip")]);
+  const zf = await dl.path(), files = unzip(readFileSync(zf));
+  assert(files["audio.wav"]?.equals(detailMsg.audio) && files["foto-1.png"] && files["transcricao.txt"].toString().includes(STUB_TRANSCRIPT), `downloaded zip: ${Object.keys(files)}`);
+  await p.screenshot({ path: `${OUT}/panel-detail-edited.png`, fullPage: true });
+  // Apagar envio: an in-page confirmation (no browser dialog); Cancelar keeps it, Apagar deletes and goes back to the list.
+  await p.click("#delete");
+  assert(await p.locator("#confirm").isVisible() && (await p.locator("#confirm").innerText()).includes("somem para sempre"), "no confirmation");
+  await p.screenshot({ path: `${OUT}/panel-detail-delete-confirm.png`, fullPage: true });
+  await p.click("#cancel-delete"); assert(!(await p.locator("#confirm").isVisible()) && await panelRow(id), "Cancelar did not keep it");
+  await p.click("#delete"); await p.click("#confirm-delete"); await p.waitForURL(BASE + "/painel", { timeout: 10000 }); await p.waitForLoadState("networkidle");
+  assert(dialogs === 0, "a browser dialog was used");
+  assert(await p.locator(`li[data-id="${id}"]`).count() === 0 && !(await panelRow(id)), "message still listed");
+  for (const k of ["media", "photo-1", "photo-2"]) assert(!r2has(`media/${id}/${k}`), `media/${id}/${k} still in R2`);
+  // A video plays in a <video>; an unknown id says so.
+  await p.goto(`${BASE}/painel/envio/demo-3`, { waitUntil: "networkidle" });
+  assert(await p.locator("video#video").evaluate((v) => v.readyState >= 1 || new Promise((r) => { v.onloadedmetadata = () => r(true); v.onerror = () => r(false); setTimeout(() => r(false), 5000); })), "video did not load");
+  await p.screenshot({ path: `${OUT}/panel-detail-video.png`, fullPage: true });
+  const nf = await fetch(`${BASE}/painel/envio/nope`); assert(nf.status === 404 && (await nf.text()).includes("Envio não encontrado"), "unknown id");
+  await ctx.close();
+});
+await check("ui: panel detail at phone width has no horizontal scroll", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx); const p = await ctx.newPage();
+  await p.goto(BASE + "/painel/envio/demo-1", { waitUntil: "networkidle" });
+  const w = await p.evaluate(() => document.documentElement.scrollWidth);
+  await p.screenshot({ path: `${OUT}/panel-detail-mobile.png`, fullPage: true }); await ctx.close();
+  assert(w <= 390, `scrollWidth ${w}`);
+});
 await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
 await check("ui: record main flow", async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ["microphone"], recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } } });
@@ -972,8 +1126,12 @@ await browser.close();
   const post = (path, headers = {}) => fetch(B2 + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }).then((r) => r.status).catch(() => 0);
   await check("auth: the public page stays public", async () => { const st = await get("/"); assert(st === 200, `${st}`); });
   await check("auth: no credentials → 401 even on localhost with DEV_OPEN once a token is configured", async () => {
-    for (const p of ["/painel", "/painel/foto/demo-1", "/api/panel/submissions"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
+    for (const p of ["/painel", "/painel/foto/demo-1", "/api/panel/submissions", "/painel/envio/demo-1", "/painel/arquivo/demo-1/media", "/painel/arquivo/demo-1/photo-1", "/painel/envio/demo-1/arquivos.zip"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
     const st = await post("/mcp"); assert(st === 401, `/mcp → ${st}`);
+    for (const method of ["POST", "DELETE"]) {
+      const r = await fetch(B2 + "/api/panel/submissions/demo-1", { method, headers: { "content-type": "application/json" }, body: method === "POST" ? '{"status":"used"}' : undefined }).then((x) => x.status).catch(() => 0);
+      assert(r === 401, `${method} /api/panel/submissions/demo-1 → ${r}`);
+    }
   });
   await check("auth: wrong / empty Bearer → 401", async () => {
     for (const h of ["Bearer wrong", "Bearer ", `Bearer ${TOKEN}x`]) { const st = await post("/mcp", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
@@ -1007,6 +1165,15 @@ await browser.close();
     const pu = new URL(ph.upload.url);
     assert(ph.upload.mode === "single" && pu.pathname === `/coffee-time-media/incoming/${d.body.id}/photo-2` && Number(pu.searchParams.get("X-Amz-Expires")) <= 900, `photo url ${ph.upload.url}`);
     assert((await fetch(B3 + `/api/drafts/${d.body.id}/photo-2`, { method: "PUT", body: "x" })).status === 404, "Worker photo route open while S3 keys are set");
+  });
+  await check("mcp: with S3 keys, get_submission download URLs are signed R2 GETs of the message's keys, ≤ 15 min", async () => {
+    const r = await fetch(B3 + "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_submission", arguments: { id: "demo-1" } } }) }).then((x) => x.json());
+    const dl = JSON.parse(r.result.content[0].text).downloads;
+    assert(dl?.expires_in > 0 && dl.expires_in <= 900 && dl.photos.length === 1, JSON.stringify(dl));
+    for (const [u, key] of [[dl.media, "media/demo-1/media"], [dl.photos[0], "media/demo-1/photo-1"]]) {
+      const x = new URL(u), exp = Number(x.searchParams.get("X-Amz-Expires"));
+      assert(x.host === "337de6b8e4de301a53ecae0c06afcc72.r2.cloudflarestorage.com" && x.pathname === `/coffee-time-media/${key}` && exp > 0 && exp <= 900 && /^[0-9a-f]{64}$/.test(x.searchParams.get("X-Amz-Signature") || ""), `url ${u}`);
+    }
   });
   kill3();
 }

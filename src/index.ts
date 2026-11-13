@@ -5,6 +5,7 @@ import { panelPage, privacyPage, startPage } from "./pages";
 import { registerDrafts } from "./api/drafts";
 import { registerSend } from "./api/send";
 import { queue, type Job } from "./jobs/transcribe";
+import { downloadUrls, registerPanel, type Row } from "./panel/detail";
 
 export type Env = {
   DB: D1Database;
@@ -91,11 +92,12 @@ app.get("/painel/foto/:id", async (c) => {
   return new Response(b, { headers: { "content-type": type, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" } });
 });
 app.get("/api/panel/submissions", async (c) => c.json(await listSubmissions(c.env.DB, c.req.query())));
+registerPanel(app); // detail page, files, zip, status/tags, delete (src/panel/detail.ts)
 
 // MCP (JSON-RPC over HTTP)
 const TOOLS = [
   { name: "list_submissions", description: "List messages; filter by status (new, favorite, used), tag, or text in the transcript.", inputSchema: { type: "object", properties: { status: { type: "string" }, tag: { type: "string" }, q: { type: "string" } } } },
-  { name: "get_submission", description: "One message with transcript, tags and media keys.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+  { name: "get_submission", description: "One message with transcript, tags, media keys and `downloads`: short-lived URLs (15 min) for the media, the audio track of a video and the photos.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "set_status", description: "Set status to new, favorite or used.", inputSchema: { type: "object", properties: { id: { type: "string" }, status: { type: "string", enum: ["new", "favorite", "used"] } }, required: ["id", "status"] } },
 ];
 app.post("/mcp", async (c) => {
@@ -109,8 +111,9 @@ app.post("/mcp", async (c) => {
   const { name, arguments: a = {} } = msg.params || {};
   if (name === "list_submissions") return text(await listSubmissions(c.env.DB, a));
   if (name === "get_submission") {
-    const row = await c.env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(a.id).first();
-    return row ? text(row) : text({ error: "not found" }, true);
+    const row = await c.env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(a.id).first<Row>();
+    if (!row) return text({ error: "not found" }, true);
+    return text({ ...row, downloads: row.status === "uploading" ? null : await downloadUrls(c.env, row, new URL(c.req.url).origin) });
   }
   if (name === "set_status") {
     if (!["new", "favorite", "used"].includes(a.status)) return text({ error: "invalid status" }, true);
