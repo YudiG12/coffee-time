@@ -1,10 +1,11 @@
-// Coffee Time Worker: public site, panel (Cloudflare Access), MCP (Bearer token) and the transcript queue consumer. See ARCHITECTURE.md.
+// Coffee Time Worker: public site, panel (Cloudflare Access), MCP (Bearer token), the transcript queue consumer and the hourly sweep. See ARCHITECTURE.md.
 import { Hono } from "hono";
 import { safeEqual, verifyAccess } from "./auth";
 import { panelPage, privacyPage, startPage } from "./pages";
 import { registerDrafts } from "./api/drafts";
 import { registerSend } from "./api/send";
 import { queue, type Job } from "./jobs/transcribe";
+import { scheduled } from "./jobs/sweep";
 import { downloadUrls, registerPanel, type Row } from "./panel/detail";
 
 export type Env = {
@@ -123,4 +124,4 @@ app.post("/mcp", async (c) => {
   return text({ error: `unknown tool ${name}` }, true);
 });
 
-export default { fetch: app.fetch, queue } satisfies ExportedHandler<Env, Job>;
+export default { fetch: app.fetch, queue, scheduled } satisfies ExportedHandler<Env, Job>;

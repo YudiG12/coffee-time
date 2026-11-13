@@ -20,6 +20,8 @@
     ]
   },
   "ai": { "binding": "AI" },
+  // Hourly sweep (ADR 0002, src/jobs/sweep.ts): finishes unconfirmed sends, deletes old drafts and failed sends.
+  "triggers": { "crons": ["0 * * * *"] },
   // Public vars. keep_vars keeps the ones set in the dashboard (ACCESS_TEAM_DOMAIN, ACCESS_AUD) on deploy.
   "vars": { "TURNSTILE_SITE_KEY": "0x4AAAAAAF-1nui9upefCZ7a", "R2_ACCOUNT_ID": "337de6b8e4de301a53ecae0c06afcc72" },
   "keep_vars": true,
