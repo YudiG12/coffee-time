@@ -647,6 +647,33 @@ await check("ui: start page layout, tabs and icons (mobile + desktop)", async ()
     await ctx.close();
   }
 });
+// Issue #29: "Como fica no vlog" says the first episode isn't out yet; the thumbnail stays, marked "Exemplo".
+await check("ui: vlog notice says the first episode is still being recorded, example marked (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    const soon = p.locator(".vlog #vlog-soon");
+    assert(await soon.isVisible(), `${name}: notice not visible`);
+    assert((await soon.innerText()).trim() === "O primeiro episódio ainda está sendo gravado. Em breve aparece aqui.", `${name}: notice text: ${await soon.innerText()}`);
+    assert(await p.locator("#vlog-soon svg").count() === 1, `${name}: notice has no icon`);
+    const ex = p.locator(".vlog .thumb #vlog-example");
+    assert(await p.locator(".vlog .thumb").isVisible() && await ex.isVisible(), `${name}: example thumbnail or its tag missing`);
+    assert((await ex.innerText()).trim().toLowerCase() === "exemplo", `${name}: example tag text`);
+    assert(/exemplo/i.test(await p.getAttribute(".vlog .thumb", "aria-label")), `${name}: thumbnail label does not say it is an example`);
+    const r = await p.evaluate(() => {
+      const el = document.getElementById("vlog-soon"), b = el.getBoundingClientRect(), v = document.querySelector(".vlog").getBoundingClientRect(), cs = getComputedStyle(el);
+      const lum = (c) => { const [r, g, b] = c.match(/\d+(\.\d+)?/g).slice(0, 3).map((x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+      const [a, c] = [lum(cs.color), lum(cs.backgroundColor)];
+      return { inside: b.left >= v.left - 1 && b.right <= v.right + 1, clip: el.scrollWidth > el.clientWidth + 1, size: parseFloat(cs.fontSize), contrast: (Math.max(a, c) + 0.05) / (Math.min(a, c) + 0.05), scroll: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert(r.inside && !r.clip && !r.scroll, `${name}: notice overflows (${JSON.stringify(r)})`);
+    assert(r.size >= 14 && r.contrast >= 4.5, `${name}: notice not readable (font ${r.size}px, contrast ${r.contrast.toFixed(2)})`);
+    await p.locator(".vlog").scrollIntoViewIfNeeded();
+    await p.screenshot({ path: `${OUT}/vlog-notice-${name}.png`, fullPage: true });
+    await ctx.close();
+  }
+});
 // Audio recording as in docs/design/*-1b-recording.png and *-1-audio-ready.png, with Chromium's fake microphone.
 await check("ui: record audio with a fake microphone, stop, ready, re-record (mobile + desktop)", async () => {
   for (const [vp, name, stopLabel] of [[{ width: 390, height: 844 }, "mobile", "Toque para parar"], [{ width: 1440, height: 900 }, "desktop", "Clique para parar"]]) {
