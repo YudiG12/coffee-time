@@ -761,13 +761,16 @@ ${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p cla
   const d = await save({ status: b.dataset.status }); if (!d) return;
   for (const x of $("status").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x.dataset.status === d.status));
  });
- // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels)
+ // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels). Edits run one after another and each starts
+ // from the list the previous one saved, so two quick clicks can't bring a removed tag back.
+ let queue = Promise.resolve();
+ const editTags = (change) => (queue = queue.then(async () => { const d = await save({ tags: change(tags) }); if (d) tags = d.tags; renderTags(); }));
  const renderTags = () => {
   const box = $("tags"); if (!box) return; box.textContent = "";
   tags.forEach((t, i) => {
    const s = document.createElement("span"); s.className = "tag" + (i === 0 ? " type" : ""); s.dataset.tag = t; s.append(t);
    const x = document.createElement("button"); x.type = "button"; x.innerHTML = X; x.setAttribute("aria-label", "Remover tag " + t);
-   x.onclick = async () => { const d = await save({ tags: tags.filter((y) => y !== t) }); if (d) { tags = d.tags; renderTags(); } };
+   x.onclick = () => { s.style.opacity = ".5"; x.disabled = true; editTags((list) => list.filter((y) => y !== t)); };
    s.append(x); box.append(s);
   });
   const add = document.createElement("button"); add.type = "button"; add.className = "add"; add.id = "add-tag"; add.textContent = "+ tag";
@@ -777,8 +780,7 @@ ${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p cla
    const finish = async (keep) => {
     if (done) return; done = true;
     const v = inp.value.trim();
-    if (keep && v) { const d = await save({ tags: [...tags, v] }); if (d) tags = d.tags; }
-    renderTags();
+    if (keep && v) editTags((list) => [...list, v]); else renderTags();
    };
    inp.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
    inp.onblur = () => finish(true);

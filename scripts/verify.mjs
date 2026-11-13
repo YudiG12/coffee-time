@@ -1072,8 +1072,16 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   await p.click('#status button[data-status="favorite"]');
   assert(await until(async () => (await panelRow(id)).status === "favorite", 5000), "status not saved");
   assert(await p.locator('#status button[aria-pressed="true"]').innerText() === "Favorito", "status switch not updated");
-  await p.click('#tags .tag[data-tag="Idempotência"] button');
-  assert(await until(async () => !JSON.parse((await panelRow(id)).tags).includes("Idempotência"), 5000), "tag not removed");
+  // Two removals clicked before the first save answers (saves slowed down here): both stick.
+  await p.route(`**/api/panel/submissions/${id}`, async (r) => { await wait(600); await r.continue(); });
+  const start = JSON.parse((await panelRow(id)).tags);
+  assert(start.includes("Idempotência") && start.includes("Carreira"), `tags before: ${start}`);
+  await p.click('#tags .tag[data-tag="Idempotência"] button'); await p.click('#tags .tag[data-tag="Carreira"] button');
+  assert(await until(async () => { const t = JSON.parse((await panelRow(id)).tags); return !t.includes("Idempotência") && !t.includes("Carreira"); }, 8000), `quick removals: ${(await panelRow(id)).tags}`);
+  await wait(1500);
+  const left = JSON.parse((await panelRow(id)).tags), shown = await p.locator("#tags .tag").evaluateAll((els) => els.map((e) => e.dataset.tag));
+  assert(!left.includes("Idempotência") && !left.includes("Carreira") && JSON.stringify(shown) === JSON.stringify(left), `after quick removals: saved ${left}, shown ${shown}`);
+  await p.unroute(`**/api/panel/submissions/${id}`);
   await p.click("#add-tag"); await p.fill("#new-tag", "  Entrevista "); await p.press("#new-tag", "Enter");
   assert(await until(async () => JSON.parse((await panelRow(id)).tags).includes("Entrevista"), 5000), "tag not added");
   await p.locator('#tags .tag[data-tag="Entrevista"]').waitFor();
