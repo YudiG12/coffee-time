@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-13 · 🔒 **Send form, server check and thanks page** ([#18](https://github.com/YudiG12/coffee-time/pull/18) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-18))
 - 2026-11-13 · 🔒 **Create a draft and upload the media to R2 in the background** ([#17](https://github.com/YudiG12/coffee-time/pull/17) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-17))
 - 2026-11-13 · **Upload a file and the Video tab** ([#16](https://github.com/YudiG12/coffee-time/pull/16) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-16))
 - 2026-11-13 · 🔒 **Record audio in the browser** ([#15](https://github.com/YudiG12/coffee-time/pull/15) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-15))
