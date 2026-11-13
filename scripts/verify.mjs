@@ -318,7 +318,7 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
-  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits); a commit lost to the sweep removes its copies", async () => {
+  await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits); a commit lost to the sweep removes its copies, a failed status lookup keeps them", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
     const sm = await import("data:text/javascript;base64," + Buffer.from(sjs).toString("base64"));
     globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -333,7 +333,8 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
       list: async ({ prefix }) => ({ objects: [...store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })) }),
     };
     const DB = { prepare: (sql) => ({ bind: (...a) => ({
-      first: async () => (row.status === "uploading" && a[0] === row.id ? row : null),
+      first: async () => { if (/^SELECT status/.test(sql)) { if (row.failLookup) throw new Error("D1 hiccup"); return a[0] === row.id ? { status: row.status } : null; }
+        return row.status === "uploading" && a[0] === row.id ? row : null; },
       run: async () => { if (/status = 'new'/.test(sql) && row.status === "uploading" && !row.claimed) { Object.assign(row, { status: "new", media_key: a[2] }); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; },
     }) }) };
     const jobs = [], JOBS = { send: async (m) => { jobs.push(m); } };
@@ -361,6 +362,13 @@ await check("api: a failing job is retried, ends in the dead-letter queue, and t
     const lost = await send(); JOBS.send = realSend; delete row.claimed;
     assert(lost.status === 404 && row.status === "uploading", `send that lost to the sweep → ${lost.status}, status ${row.status}`);
     assert(["media", "photo-1", "photo-2"].every((k) => !store.has(`media/d1/${k}`)), `copies left in media/: ${[...store.keys()].join(",")}`);
+    // Another request commits the message while this one is copying, and the status lookup then fails: the copies
+    // (the committed message's files) are kept, because nothing proves they are unowned.
+    Object.assign(row, { status: "uploading", media_key: "incoming/d1/media" });
+    JOBS.send = async (m) => { jobs.push(m); Object.assign(row, { status: "new", media_key: "media/d1/media", failLookup: true }); };
+    const raced = await send(); JOBS.send = realSend; delete row.failLookup;
+    assert(raced.status === 404 && row.status === "new", `send that lost to another Send → ${raced.status}, status ${row.status}`);
+    assert(["media", "photo-1", "photo-2"].every((k) => store.has(`media/d1/${k}`)), `a failed status lookup deleted the committed message's files: ${[...store.keys()].join(",")}`);
   });
   await check("api: Turnstile check rejects failing keys and asks siteverify with the real secret", async () => {
     assert(await m.checkTurnstile("tok", "2x0000000000000000000000000000000AA", "1.2.3.4", true) === false, "always-fail test key passed");
