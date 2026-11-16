@@ -679,7 +679,10 @@ ${PANEL_CSS}
 .grid{display:grid;grid-template-columns:80px 220px minmax(0,1fr) 92px 130px 112px;column-gap:16px;align-items:center}
 .cols{padding:0 0 10px;border-bottom:1px solid var(--line)}.cols .eyebrow{font-size:10px}
 #submissions{list-style:none;padding:0;margin:0}
-#submissions li{padding:20px 16px;margin:0 -16px;border-bottom:1px solid var(--line)}#submissions li:hover{background:var(--surface)}
+#submissions li{padding:20px 16px;margin:0 -16px;border-bottom:1px solid var(--line);cursor:pointer;transition:background-color .15s ease,transform .12s ease}
+#submissions li:hover{background:var(--surface)}#submissions li:active{background:var(--surface);transform:scale(.993)}
+#submissions li:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;background:var(--surface)}
+@media (prefers-reduced-motion:reduce){#submissions li{transition:none}#submissions li:active{transform:none}}
 .thumb{width:64px;height:64px;border-radius:4px;object-fit:cover;display:block;background:#2C221A}
 .thumb.icon{display:flex;align-items:center;justify-content:center;color:var(--accent);background:#3A2C1F;border:1px solid var(--line2)}
 .thumb.icon[data-kind=audio]{background:#221A14}
@@ -704,15 +707,27 @@ ${panelTop(o.user)}
 <nav class="filters" aria-label="Filtros">${TABS.map(([k, label]) => `<a class="tab" data-status="${k || "all"}" href="${href({ status: k })}"${o.filter.status === k ? ' aria-current="page"' : ""}>${label}${k ? ` <span>${o.counts[k] || 0}</span>` : ""}</a>`).join("")}
 ${o.tags.length ? `<div class="sep"></div><span class="eyebrow">Tags</span>${o.tags.map((t) => `<a class="chip" data-tag="${esc(t)}" href="${href({ tag: o.filter.tag === t ? "" : t })}"${o.filter.tag === t ? ' aria-current="true"' : ""}>${esc(t)}</a>`).join("")}` : ""}</nav>
 <div class="grid cols" aria-hidden="true"><span></span><span class="eyebrow">Quem</span><span class="eyebrow">O que falou</span><span class="eyebrow">Duração</span><span class="eyebrow">Quando</span><span class="eyebrow">Status</span></div>
-${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" class="grid">
+${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" data-href="/painel/envio/${esc(encodeURIComponent(r.id))}" class="grid" tabindex="0">
  <div class="c-t"><a href="/painel/envio/${encodeURIComponent(r.id)}" tabindex="-1" aria-hidden="true">${thumb(r)}</a></div>
- <div class="c-w who"><b><a class="open" href="/painel/envio/${encodeURIComponent(r.id)}">${esc(who(r))}</a></b><small>${sub(r)}</small></div>
+ <div class="c-w who"><b><a class="open" href="/painel/envio/${encodeURIComponent(r.id)}" tabindex="-1">${esc(who(r))}</a></b><small>${sub(r)}</small></div>
  <div class="c-x said">${said(r)}</div>
  <div class="c-d dur">${r.duration_s != null ? fmt(r.duration_s) : "–"}</div>
  <div class="c-u date">${esc(when(r.created_at, o.now))}</div>
  <div class="c-s"><span class="status ${esc(r.status)}">${esc(STATUS[r.status] || r.status)}</span></div></li>`).join("")}</ul>`
     : `<ul id="submissions"></ul><p class="empty">Nenhum envio por aqui.</p>`}
-</main>`);
+</main>
+<script>
+// The whole row opens the submission (#30). Links inside it (tag pills filter the list, the name and photo open it)
+// keep their own behavior; selecting transcript text doesn't navigate; Ctrl/Cmd/middle click opens a new tab.
+(() => {
+ const list = document.getElementById("submissions");
+ const open = (li, e) => (e.ctrlKey || e.metaKey || e.button === 1 ? window.open(li.dataset.href, "_blank", "noopener") : location.assign(li.dataset.href));
+ const row = (e) => { const li = e.target.closest("li[data-href]"); return li && !e.target.closest("a,button,input") ? li : null; };
+ list.addEventListener("click", (e) => { const li = row(e); if (li && !String(getSelection() || "")) open(li, e); });
+ list.addEventListener("auxclick", (e) => { const li = row(e); if (li && e.button === 1) open(li, e); });
+ list.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("li[data-href]")) { e.preventDefault(); open(e.target, e); } });
+})();
+</script>`);
 };
 
 // Panel detail: docs/design/panel-detail.png. Player (audio with bars, or the video), transcript, photos; on the side
