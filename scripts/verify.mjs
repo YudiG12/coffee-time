@@ -1294,9 +1294,9 @@ await check("ui: panel list as in the design: first photo or icon, columns, \"N 
 async function searched(p, q) {
   await p.waitForFunction((q) => (new URL(location.href).searchParams.get("q") || "") === q && document.getElementById("results").getAttribute("aria-busy") === "false", q, { timeout: 5000 });
 }
-await check("ui: panel search filters as you type without a reload (URL keeps ?q=), matches name, transcript and tags, ignores case and accents; empty result message; clearing restores the list", async () => {
-  // A message from "João" (accent in the name), removed at the end.
-  d1sql("INSERT INTO submissions (id, created_at, status, kind, name, anonymous, consent_at, duration_s, photo_keys, transcript, tags) VALUES ('demo-joao', datetime('now','-5 days'), 'used', 'audio', 'João Pereira', 0, datetime('now'), 30, '[]', 'Mensagem de teste da busca.', '[]')");
+await check("ui: panel search filters as you type without a reload (URL keeps ?q=), matches the shown name (also \"Sem nome\"), transcript and tags, ignores case and accents; empty result message; clearing restores the list", async () => {
+  // A message from "João" (accent in the name) and one without a name ("Sem nome" in the list), removed at the end.
+  d1sql("INSERT INTO submissions (id, created_at, status, kind, name, anonymous, consent_at, duration_s, photo_keys, transcript, tags) VALUES ('demo-joao', datetime('now','-5 days'), 'used', 'audio', 'João Pereira', 0, datetime('now'), 30, '[]', 'Mensagem de teste da busca.', '[]'), ('demo-noname', datetime('now','-6 days'), 'used', 'audio', NULL, 0, datetime('now'), 20, '[]', 'Outra mensagem de teste.', '[]')");
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
   try {
     p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
@@ -1320,6 +1320,8 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     await type("duvida"); assert((await ids()).includes("demo-1") && (await ids()).includes("demo-2"), `duvida (tag Dúvida): ${await ids()}`);
     // An anonymous sender's real name is never searchable; "anonimo" finds anonymous messages.
     assert(!(await api_("Fulano")).length, `an anonymous sender's name is searchable: ${await api_("Fulano")}`);
+    // No name given: the list says "Sem nome", and so does the search.
+    await type("sem nome"); assert((await ids()).includes("demo-noname") && (await p.locator('li[data-id="demo-noname"]').innerText()).includes("Sem nome"), `sem nome: ${await ids()}`);
     await type("anonimo"); assert((await ids()).includes("demo-2") && !(await ids()).includes("demo-1"), `anonimo: ${await ids()}`);
     // No reload: the same document (a marker set on load survives), the history entry is rewritten, the links carry the search.
     assert((await p.evaluate(() => window.__same)) === true && (await p.evaluate(() => history.length)) === hist, "page reloaded or history grew");
@@ -1336,7 +1338,7 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     assert(JSON.stringify(await ids()) === '["demo-joao"]' && (await p.inputValue('input[name="q"]')) === "joao", "?q= link");
     // A row from the swapped-in list still opens the detail.
     await type("marina"); await p.locator('li[data-id="demo-1"] .c-u').click(); await p.waitForURL("**/painel/envio/demo-1", { timeout: 5000 });
-  } finally { await ctx.close(); d1sql("DELETE FROM submissions WHERE id = 'demo-joao'"); }
+  } finally { await ctx.close(); d1sql("DELETE FROM submissions WHERE id IN ('demo-joao', 'demo-noname')"); }
 });
 await check("ui: panel at phone width has no horizontal scroll", async () => {
   await shot("panel-mobile", "/painel", { width: 390, height: 844 });
