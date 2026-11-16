@@ -1415,7 +1415,7 @@ await check("ui: panel says \"Transcrevendo…\" before the job runs, then the t
   await shot("panel-transcribed", "/painel", { width: 1440, height: 900 });
 });
 // docs/design/panel-detail.png: back link, name + meta, player, transcript, photos; status switch, tags, zip, delete.
-await check("ui: panel detail as in the design: player, transcript, photos, status switch, editable tags, zip download, delete with in-page confirmation", async () => {
+await check("ui: panel detail as in the design: player, transcript, photos, status switch, editable tags, zip download, delete confirmed in the same button", async () => {
   const { id } = detailMsg;
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true }); await offline(ctx); const p = await ctx.newPage();
   p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
@@ -1471,12 +1471,24 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   const zf = await dl.path(), files = unzip(readFileSync(zf));
   assert(files["audio.wav"]?.equals(detailMsg.audio) && files["foto-1.png"] && files["transcricao.txt"].toString().includes(STUB_TRANSCRIPT), `downloaded zip: ${Object.keys(files)}`);
   await p.screenshot({ path: `${OUT}/panel-detail-edited.png`, fullPage: true });
-  // Apagar envio: an in-page confirmation (no browser dialog); Cancelar keeps it, Apagar deletes and goes back to the list.
-  await p.click("#delete");
-  assert(await p.locator("#confirm").isVisible() && (await p.locator("#confirm").innerText()).includes("somem para sempre"), "no confirmation");
-  await p.screenshot({ path: `${OUT}/panel-detail-delete-confirm.png`, fullPage: true });
-  await p.click("#cancel-delete"); assert(!(await p.locator("#confirm").isVisible()) && await panelRow(id), "Cancelar did not keep it");
-  await p.click("#delete"); await p.click("#confirm-delete"); await p.waitForURL(BASE + "/painel", { timeout: 10000 }); await p.waitForLoadState("networkidle");
+  // Apagar envio (#33): the button itself turns into "Confirmar exclusão" (danger style, no browser dialog, no extra box);
+  // a click elsewhere or 4 s put it back; confirming animates the page out and goes back to the list.
+  const del = p.locator("#delete");
+  const look = () => del.evaluate((b) => ({ text: b.textContent, armed: b.classList.contains("armed"), bg: getComputedStyle(b).backgroundColor, anim: getComputedStyle(b).animationName }));
+  const idle = await look();
+  await del.click(); const anim0 = await look(); await p.waitForTimeout(300); const on = { ...(await look()), anim: anim0.anim };
+  assert(on.text === "Confirmar exclusão" && on.armed && on.bg !== idle.bg && on.anim === "arm" && await p.locator("#confirm").count() === 0, `armed: ${JSON.stringify(on)} idle ${JSON.stringify(idle)}`);
+  assert((await p.locator("#delete-hint").innerText()).includes("somem para sempre"), "no hint under the armed button");
+  await p.waitForTimeout(250); await p.screenshot({ path: `${OUT}/panel-detail-delete-confirm.png`, fullPage: true });
+  await p.click("#transcript"); const back = await look();
+  assert(back.text === "Apagar envio" && !back.armed && !(await p.locator("#delete-hint").isVisible()) && await panelRow(id), `click elsewhere: ${JSON.stringify(back)}`);
+  await del.click(); assert((await look()).armed, "not armed again");
+  assert(await until(async () => (await look()).text === "Apagar envio", 6000) && await panelRow(id), "did not revert after a few seconds");
+  const removal = p.evaluate(() => new Promise((r) => { const m = document.querySelector("main.panel");
+    new MutationObserver(() => m.classList.contains("removing") && r(getComputedStyle(m).animationName)).observe(m, { attributes: true }); }));
+  await del.click(); await del.click();
+  const anim = await removal; assert(anim === "remove", `removal animation: ${anim}`);
+  await p.waitForURL(BASE + "/painel", { timeout: 10000 }); await p.waitForLoadState("networkidle");
   assert(dialogs === 0, "a browser dialog was used");
   assert(await p.locator(`li[data-id="${id}"]`).count() === 0 && !(await panelRow(id)), "message still listed");
   for (const k of ["media", "photo-1", "photo-2"]) assert(!r2has(`media/${id}/${k}`), `media/${id}/${k} still in R2`);
@@ -1486,6 +1498,81 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   await p.screenshot({ path: `${OUT}/panel-detail-video.png`, fullPage: true });
   const nf = await fetch(`${BASE}/painel/envio/nope`); assert(nf.status === 404 && (await nf.text()).includes("Envio não encontrado"), "unknown id");
   await ctx.close();
+});
+// #33: status and tag changes show before the save answers (saves held here), roll back with a message when the save
+// fails; buttons have hover and press feedback; with prefers-reduced-motion nothing animates.
+await check("ui: detail actions are instant: status and tags show before the save answers and roll back with a message on a failed save; hover/press feedback; reduced motion stops it", async () => {
+  const id = await sendAudio(wav(1), "Caio Instantâneo");
+  assert(await until(async () => (await panelRow(id))?.transcript != null, 30000), "never transcribed");
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
+  p.on("pageerror", (e) => errors.push(e.message));
+  let gate = Promise.resolve(), open = () => {}, fail = false;
+  const hold = (f) => { fail = f; gate = new Promise((r) => { open = r; }); };
+  await p.route(`**/api/panel/submissions/${id}`, async (r) => {
+    if (r.request().method() !== "POST") return r.continue();
+    await gate; return fail ? r.fulfill({ status: 500, body: "" }) : r.continue();
+  });
+  await p.goto(`${BASE}/painel/envio/${id}`, { waitUntil: "networkidle" });
+  const pressed = () => p.locator('#status button[aria-pressed="true"]').innerText();
+  const shownTags = () => p.locator("#tags .tag:not(.leave)").evaluateAll((els) => els.map((e) => e.dataset.tag));
+  const saved = async () => { const r = await panelRow(id); return { status: r.status, tags: JSON.parse(r.tags) }; };
+  const start = await saved();
+  assert(start.status === "new" && start.tags.includes("Rotina"), `start: ${JSON.stringify(start)}`);
+  // Saves held: the switch, a new tag and a removed tag all show before the server answers.
+  hold(false);
+  await p.click('#status button[data-status="used"]');
+  const pop = await p.locator('#status button[data-status="used"]').evaluate((b) => getComputedStyle(b).animationName);
+  assert(await pressed() === "Usado" && pop === "pop" && (await saved()).status === "new", `status before the reply: ${await pressed()} ${pop}`);
+  await p.click("#add-tag"); await p.fill("#new-tag", "Bastidores"); await p.press("#new-tag", "Enter");
+  assert((await shownTags()).includes("Bastidores") && await p.locator('#tags .tag[data-tag="Bastidores"]').evaluate((t) => getComputedStyle(t).animationName) === "pop", `added tag not shown at once: ${await shownTags()}`);
+  await p.click('#tags .tag[data-tag="Rotina"] button');
+  assert(!(await shownTags()).includes("Rotina") && !(await saved()).tags.includes("Bastidores"), `removed tag still shown: ${await shownTags()}`);
+  await p.screenshot({ path: `${OUT}/panel-detail-instant.png`, fullPage: true });
+  open();
+  assert(await until(async () => { const s = await saved(); return s.status === "used" && s.tags.includes("Bastidores") && !s.tags.includes("Rotina"); }, 8000), `held saves: ${JSON.stringify(await saved())}`);
+  await wait(300);
+  assert(await pressed() === "Usado" && JSON.stringify(await shownTags()) === JSON.stringify((await saved()).tags) && await p.locator("#msg").innerText() === "", `after the saves: ${await shownTags()}`);
+  // A failed save: the change shows at once, then rolls back with a message; nothing changes on the server.
+  hold(true);
+  await p.click('#status button[data-status="favorite"]');
+  assert(await pressed() === "Favorito", "favorite not shown at once");
+  await p.click('#tags .tag[data-tag="Bastidores"] button');
+  assert(!(await shownTags()).includes("Bastidores"), "removal not shown at once");
+  open();
+  assert(await until(async () => (await pressed()) === "Usado" && (await shownTags()).includes("Bastidores"), 5000), `no rollback: ${await pressed()} ${await shownTags()}`);
+  assert(await until(async () => (await p.locator("#msg").innerText()).includes("Não deu para salvar"), 3000), "no message after a failed save");
+  const after = await saved();
+  assert(after.status === "used" && after.tags.includes("Bastidores") && JSON.stringify(await shownTags()) === JSON.stringify(after.tags), `server or tags after the failure: ${JSON.stringify(after)} shown ${await shownTags()}`);
+  await p.screenshot({ path: `${OUT}/panel-detail-rollback.png`, fullPage: true });
+  hold(false); open();
+  // Hover and press feedback on the buttons.
+  const seg = p.locator('#status button[data-status="new"]'), bg0 = await seg.evaluate((b) => getComputedStyle(b).backgroundColor);
+  await seg.hover(); await p.waitForTimeout(300);
+  assert(await seg.evaluate((b) => getComputedStyle(b).backgroundColor) !== bg0, "no hover on the status switch");
+  const addB = p.locator("#add-tag"), ab0 = await addB.evaluate((b) => getComputedStyle(b).borderColor);
+  await addB.hover(); await p.waitForTimeout(300);
+  assert(await addB.evaluate((b) => getComputedStyle(b).borderColor) !== ab0, "no hover on + tag");
+  const delB = p.locator("#delete"), db0 = await delB.evaluate((b) => getComputedStyle(b).backgroundColor);
+  await delB.hover(); await p.waitForTimeout(300);
+  assert(await delB.evaluate((b) => getComputedStyle(b).backgroundColor) !== db0, "no hover on Apagar envio");
+  const pressOn = async (page, sel) => { const b = await page.locator(sel).boundingBox(); await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down(); await page.waitForTimeout(150);
+    const t = await page.locator(sel).evaluate((x) => getComputedStyle(x).transform); await page.mouse.move(2, 2); await page.mouse.up(); return t; };
+  for (const sel of ["#zip", '#status button[data-status="new"]', "#add-tag", "#play"]) { const t = await pressOn(p, sel); assert(t.startsWith("matrix(0.96"), `no press feedback on ${sel}: ${t}`); }
+  await ctx.close();
+  // Reduced motion: the switch still changes at once, but nothing animates or scales.
+  const rctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" }); await offline(rctx); const r = await rctx.newPage();
+  r.on("pageerror", (e) => errors.push(e.message));
+  await r.route(`**/api/panel/submissions/${id}`, async (x) => { if (x.request().method() === "POST") { await wait(800); } return x.continue(); });
+  await r.goto(`${BASE}/painel/envio/${id}`, { waitUntil: "networkidle" });
+  await r.click('#status button[data-status="new"]');
+  const still = await r.locator('#status button[data-status="new"]').evaluate((b) => [b.getAttribute("aria-pressed"), getComputedStyle(b).animationName, getComputedStyle(b).transitionDuration]);
+  assert(still[0] === "true" && still[1] === "none" && /^0s(, 0s)*$/.test(still[2]), `reduced motion, status: ${still}`);
+  assert(await pressOn(r, "#zip") === "none", "reduced motion still scales on press");
+  await r.click("#delete");
+  assert(await r.locator("#delete").evaluate((b) => getComputedStyle(b).animationName) === "none" && (await r.locator("#delete").innerText()) === "Confirmar exclusão", "reduced motion: armed delete animates");
+  await r.keyboard.press("Escape"); assert((await r.locator("#delete").innerText()) === "Apagar envio", "Esc did not put the button back");
+  assert(await until(async () => (await saved()).status === "new", 5000), "status not saved with reduced motion");
+  await rctx.close();
 });
 await check("ui: a message finished by the hourly sweep opens in the panel like any other", async () => {
   assert(sweptId, "no swept message");

@@ -760,7 +760,8 @@ ${o.tags.length ? `<div class="sep"></div><span class="eyebrow">Tags</span>${o.t
 };
 
 // Panel detail: docs/design/panel-detail.png. Player (audio with bars, or the video), transcript, photos; on the side
-// the status switch, editable tags, "Baixar arquivos (.zip)" and "Apagar envio" with an in-page confirmation.
+// the status switch, editable tags, "Baixar arquivos (.zip)" and "Apagar envio" (confirmed in the same button).
+// Status and tag changes show at once and roll back if the save fails (#33).
 type Detail = { id: string; created_at: string; status: string; kind: string; name: string | null; anonymous: number; duration_s: number | null;
   media_key: string | null; photo_keys: string; transcript: string | null; transcript_error: string | null; tags: string };
 const DOWNLOAD = `<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>`;
@@ -797,11 +798,27 @@ aside .group{margin-bottom:22px}
 .add{height:26px;padding:0 9px;border:1px dashed var(--line2);border-radius:4px;background:none;color:var(--muted);font:600 13px Onest,system-ui,sans-serif;cursor:pointer}
 .add-input{height:26px;width:140px;padding:0 8px;border:1px solid var(--accent);border-radius:4px;background:var(--surface);color:var(--ink);font:600 13px Onest,system-ui,sans-serif;outline:0}
 a.btn{text-decoration:none;padding:12px}
-.danger{display:block;margin:16px auto 0;border:0;background:none;color:var(--rec);font:600 14px Onest,system-ui,sans-serif;cursor:pointer}
-.confirm{margin-top:14px;padding:14px;border:1px solid #5A2E26;border-radius:4px;background:#2A1A15}
-.confirm p{margin:0 0 12px;color:var(--ink2);font-size:14px;line-height:21px}
-.confirm .row{display:flex;gap:8px}.confirm .btn{padding:10px;font-size:14px}.confirm .btn.del{background:var(--rec);color:var(--on-accent)}
-.msg{min-height:20px;margin-top:10px;color:var(--rec);font-size:13px}
+.danger{display:block;width:100%;margin:12px 0 0;padding:11px;border:1px solid transparent;border-radius:4px;background:none;color:var(--rec);font:600 14px Onest,system-ui,sans-serif;cursor:pointer}
+.danger:hover{background:#2A1A15}.danger.armed{background:var(--rec);border-color:var(--rec);color:var(--on-accent);animation:arm .22s ease-out}
+.danger:disabled{cursor:progress;opacity:.7}
+.hint{margin:8px 0 0;text-align:center;color:var(--muted);font-size:13px;line-height:19px;animation:fadein .2s ease-out}
+.msg{min-height:20px;margin-top:10px;color:var(--rec);font-size:13px}.msg:not(:empty){animation:fadein .2s ease-out}
+/* Instant feedback (#33): every action shows at once, with a short animation; nothing moves with reduced motion. */
+.seg button,.add,.tag button,.danger,a.btn,.player .play{transition:background-color .18s,color .18s,border-color .18s,opacity .18s,transform .1s}
+.seg button:hover{background:#2C221A;color:var(--ink)}.seg button[aria-pressed=true]:hover{background:#4A3420;color:var(--accent)}
+.seg button.pop{animation:pop .22s ease-out}
+.add:hover{border-color:var(--accent);color:var(--accent)}a.btn.primary:hover,.player .play:hover{filter:brightness(1.08)}
+.seg button:active,.add:active,.tag button:active,.danger:active,a.btn:active,.player .play:active{transform:scale(.96)}
+.tag.enter{animation:pop .22s ease-out}.tag.leave{animation:leave .18s ease-in forwards;pointer-events:none}
+main.removing{animation:remove .3s ease-in forwards}
+@keyframes pop{from{transform:scale(.88);opacity:.6}to{transform:none;opacity:1}}
+@keyframes leave{to{transform:scale(.8);opacity:0}}
+@keyframes arm{from{transform:scale(.97)}to{transform:none}}
+@keyframes fadein{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+@keyframes remove{to{opacity:0;transform:translateY(-12px)}}
+@media (prefers-reduced-motion:reduce){.seg button,.add,.tag button,.danger,a.btn,.player .play{transition:none}
+ .seg button:active,.add:active,.tag button:active,.danger:active,a.btn:active,.player .play:active{transform:none}
+ .seg button.pop,.tag.enter,.tag.leave,.danger.armed,.hint,.msg:not(:empty),main.removing{animation:none}}
 .notfound{color:var(--muted);margin:28px 0}
 @media (max-width:900px){.detail{grid-template-columns:minmax(0,1fr);gap:28px}.title h1{font-size:28px;line-height:40px}}
 @media (max-width:600px){.photos.grid{grid-template-columns:minmax(0,1fr)}.photos.grid img:last-child:nth-child(odd){grid-column:auto}}
@@ -840,64 +857,98 @@ ${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p cla
   : `<div class="group"><span class="eyebrow label" id="status-label">Status</span><div class="seg" id="status" role="group" aria-labelledby="status-label">${[["new", "Novo"], ["favorite", "Favorito"], ["used", "Usado"]].map(([k, l]) => `<button type="button" data-status="${k}" aria-pressed="${r.status === k}">${l}</button>`).join("")}</div></div>
 <div class="group"><span class="eyebrow label">Tags</span><div class="tags" id="tags"></div></div>`}
 <a class="btn primary" id="zip" href="/painel/envio/${id}/arquivos.zip" download>${icon(DOWNLOAD, 18)}Baixar arquivos (.zip)</a>
-<button class="danger" id="delete" type="button">Apagar envio</button>
-<div class="confirm" id="confirm" hidden role="alertdialog" aria-labelledby="confirm-text"><p id="confirm-text">Apagar este envio? Os arquivos e a transcrição somem para sempre.</p>
-<div class="row"><button class="btn del" id="confirm-delete" type="button">Apagar</button><button class="btn secondary" id="cancel-delete" type="button">Cancelar</button></div></div>
+<button class="danger" id="delete" type="button" aria-describedby="delete-hint">Apagar envio</button>
+<p class="hint" id="delete-hint" hidden>Clique de novo para apagar. Os arquivos e a transcrição somem para sempre.</p>
 <p class="msg" id="msg" role="status"></p>
 </aside></div></main>
 <script>
 (() => {
  const $ = (x) => document.getElementById(x), api = "/api/panel/submissions/${id}", X = ${JSON.stringify(icon(X, 12))};
- let tags = ${JSON.stringify(tags).replace(/</g, "\\u003c")};
- const fail = () => { $("msg").textContent = "Não deu para salvar. Tente de novo."; };
+ const say = (t) => { const m = $("msg"); m.textContent = ""; if (t) requestAnimationFrame(() => { m.textContent = t; }); };
  const save = async (body) => {
-  $("msg").textContent = "";
   const r = await fetch(api, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
-  if (!r || !r.ok) { fail(); return null; }
-  return r.json();
+  if (!r || !r.ok) return null;
+  return r.json().catch(() => null);
  };
- // Status
- $("status")?.addEventListener("click", async (e) => {
+ const FAIL = "Não deu para salvar. Tente de novo.";
+ // Status: the switch moves at once; saves run one after another; a failed save puts back the last saved status.
+ const seg = $("status");
+ let status = seg?.querySelector('[aria-pressed="true"]')?.dataset.status, pending = 0, sQueue = Promise.resolve();
+ const showStatus = (k, pop) => { for (const x of seg.querySelectorAll("button")) { const on = x.dataset.status === k; x.setAttribute("aria-pressed", String(on)); x.classList.remove("pop"); if (on && pop) { void x.offsetWidth; x.classList.add("pop"); } } };
+ seg?.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-status]"); if (!b || b.getAttribute("aria-pressed") === "true") return;
-  const d = await save({ status: b.dataset.status }); if (!d) return;
-  for (const x of $("status").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x.dataset.status === d.status));
- });
- // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels). Edits run one after another and each starts
- // from the list the previous one saved, so two quick clicks can't bring a removed tag back.
- let queue = Promise.resolve();
- const editTags = (change) => (queue = queue.then(async () => { const d = await save({ tags: change(tags) }); if (d) tags = d.tags; renderTags(); }));
- const renderTags = () => {
-  const box = $("tags"); if (!box) return; box.textContent = "";
-  tags.forEach((t, i) => {
-   const s = document.createElement("span"); s.className = "tag" + (i === 0 ? " type" : ""); s.dataset.tag = t; s.append(t);
-   const x = document.createElement("button"); x.type = "button"; x.innerHTML = X; x.setAttribute("aria-label", "Remover tag " + t);
-   x.onclick = () => { s.style.opacity = ".5"; x.disabled = true; editTags((list) => list.filter((y) => y !== t)); };
-   s.append(x); box.append(s);
+  const want = b.dataset.status; say(""); showStatus(want, true); pending++;
+  sQueue = sQueue.then(async () => {
+   const d = await save({ status: want }); pending--;
+   if (d) status = d.status; else say(FAIL);
+   if (!pending || !d) showStatus(status, !d);
   });
+ });
+ // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels). The list changes at once; saves run one after
+ // another, each from the list the previous one saved, so two quick clicks can't bring a removed tag back. A failed
+ // save drops that change and shows the saved list again (plus the changes still waiting).
+ let tags = ${JSON.stringify(tags).replace(/</g, "\\u003c")};
+ let waiting = [], queue = Promise.resolve();
+ const shown = () => waiting.reduce((list, f) => f(list), tags);
+ const editTags = (change) => {
+  say(""); waiting.push(change); renderTags();
+  queue = queue.then(async () => {
+   const d = await save({ tags: change(tags) }); waiting = waiting.filter((f) => f !== change);
+   if (d) { tags = d.tags; renderTags(); } else { say(FAIL); renderTags(true); }
+  });
+ };
+ const els = new Map();
+ const makeAdd = () => {
   const add = document.createElement("button"); add.type = "button"; add.className = "add"; add.id = "add-tag"; add.textContent = "+ tag";
   add.onclick = () => {
    const inp = document.createElement("input"); inp.className = "add-input"; inp.id = "new-tag"; inp.maxLength = 30; inp.setAttribute("aria-label", "Nova tag");
    let done = false;
-   const finish = async (keep) => {
+   const finish = (keep) => {
     if (done) return; done = true;
-    const v = inp.value.trim();
-    if (keep && v) editTags((list) => [...list, v]); else renderTags();
+    const v = inp.value.trim(); inp.replaceWith(makeAdd());
+    if (keep && v) editTags((list) => (list.includes(v) ? list : [...list, v]));
+    if (!keep) $("add-tag").focus();
    };
    inp.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
    inp.onblur = () => finish(true);
    add.replaceWith(inp); inp.focus();
   };
-  box.append(add);
+  return add;
  };
- renderTags();
- // Delete: in-page confirmation, no browser dialog
- $("delete").onclick = () => { $("confirm").hidden = false; $("delete").hidden = true; $("confirm-delete").focus(); };
- $("cancel-delete").onclick = () => { $("confirm").hidden = true; $("delete").hidden = false; };
- $("confirm-delete").onclick = async () => {
-  $("confirm-delete").disabled = true;
+ // Keyed render: new tags pop in before the "+ tag" control, removed ones fade out; "all" rebuilds in order (rollback).
+ const renderTags = (all) => {
+  const box = $("tags"); if (!box) return;
+  const list = shown(), tail = box.querySelector(".add, .add-input");
+  if (all) { for (const s of els.values()) s.remove(); els.clear(); }
+  for (const [t, s] of els) if (!list.includes(t)) { els.delete(t); s.classList.add("leave"); setTimeout(() => s.remove(), matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180); }
+  list.forEach((t, i) => {
+   let s = els.get(t);
+   if (!s) {
+    s = document.createElement("span"); s.className = "tag" + (all ? "" : " enter"); s.dataset.tag = t; s.append(t);
+    const x = document.createElement("button"); x.type = "button"; x.innerHTML = X; x.setAttribute("aria-label", "Remover tag " + t);
+    x.onclick = () => editTags((l) => l.filter((y) => y !== t));
+    s.append(x); els.set(t, s); tail ? box.insertBefore(s, tail) : box.append(s);
+   }
+   s.classList.toggle("type", i === 0);
+  });
+  if (!tail) box.append(makeAdd());
+ };
+ renderTags(true);
+ // Apagar envio: the button itself turns into "Confirmar exclusão"; a click elsewhere, Esc or 4 s put it back.
+ const del = $("delete"), hint = $("delete-hint");
+ let armed = null;
+ const disarm = () => { if (!armed) return; clearTimeout(armed); armed = null; del.classList.remove("armed"); del.textContent = "Apagar envio"; hint.hidden = true; };
+ document.addEventListener("pointerdown", (e) => { if (armed && e.target !== del) disarm(); });
+ document.addEventListener("keydown", (e) => { if (e.key === "Escape") disarm(); });
+ del.onclick = async () => {
+  if (!armed) { say(""); del.classList.add("armed"); del.textContent = "Confirmar exclusão"; hint.hidden = false; armed = setTimeout(disarm, 4000); return; }
+  clearTimeout(armed); armed = null; del.disabled = true; del.textContent = "Apagando…";
   const r = await fetch(api, { method: "DELETE" }).catch(() => null);
-  if (r && r.ok) { location.href = "/painel"; return; }
-  $("confirm-delete").disabled = false; $("msg").textContent = "Não deu para apagar. Tente de novo.";
+  if (r && r.ok) {
+   const main = document.querySelector("main.panel"); main.classList.add("removing");
+   setTimeout(() => { location.href = "/painel"; }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300); return;
+  }
+  del.disabled = false; del.classList.remove("armed"); del.textContent = "Apagar envio"; hint.hidden = true; say("Não deu para apagar. Tente de novo.");
  };
  // Audio player: play/pause, bars light up as it plays, click on the bars to jump
  const a = $("audio"); if (!a) return;
