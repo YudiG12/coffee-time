@@ -351,6 +351,21 @@ await check("api: R2 CORS rule (r2-cors.json) allows PUT/POST/GET/HEAD and any h
       ["video", text, false], ["audio", text, false], ["photo", text, false], ["video", PNG, false], ["video", heic, false], ["photo", mp4, false], ["audio", new Uint8Array(), false]];
     for (const [kind, bytes, want] of cases) assert(m.sniff(kind, new Uint8Array(bytes).subarray(0, 4096)) === want, `${kind} ${Buffer.from(bytes).subarray(0, 12).toString("hex")} → ${!want}`);
   });
+  // Issue #32: the detail page reserves each photo's space from its real size, read from the first bytes.
+  await check("api: photo size from the first bytes — PNG, GIF, WebP (VP8, VP8L, VP8X), JPEG after EXIF; unknown → null", async () => {
+    const u8 = (...a) => new Uint8Array(a.flat()), b = (x) => [...Buffer.from(x, "latin1")];
+    const le16 = (n) => [n & 255, n >> 8], le24 = (n) => [n & 255, (n >> 8) & 255, n >> 16], be16 = (n) => [n >> 8, n & 255];
+    const riff = (chunk, body) => u8(b("RIFF"), [0, 0, 0, 0], b("WEBP"), b(chunk), [0, 0, 0, 0], body, Array(16).fill(0));
+    const vp8l = (w, h) => { const x = (w - 1) | ((h - 1) << 14); return [0x2f, x & 255, (x >> 8) & 255, (x >> 16) & 255, (x >>> 24) & 255]; };
+    const exif = [0xff, 0xe1, ...be16(2 + 300), ...Array(300).fill(0x45)];
+    const cases = [[PNG, 1, 1], [readFileSync("scripts/fixtures/demo-photo.png"), 256, 256], [u8(b("GIF89a"), le16(640), le16(480)), 640, 480],
+      [riff("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a, ...le16(1600), ...le16(900)]), 1600, 900], [riff("VP8L", vp8l(900, 1200)), 900, 1200],
+      [riff("VP8X", [0, 0, 0, 0, ...le24(1999), ...le24(1499)]), 2000, 1500],
+      [u8([0xff, 0xd8], exif, [0xff, 0xdb, ...be16(4), 0, 0], [0xff, 0xc2, ...be16(17), 8, ...be16(1200), ...be16(1600), 3], Array(20).fill(0)), 1600, 1200]];
+    for (const [bytes, w, h] of cases) { const s = m.photoSize(new Uint8Array(bytes)); assert(s && s.w === w && s.h === h, `${Buffer.from(bytes).subarray(0, 16).toString("hex")} → ${JSON.stringify(s)}, want ${w}×${h}`); }
+    const heic = u8([0, 0, 0, 0x18], b("ftypheic"), Array(20).fill(0));
+    for (const x of [heic, u8(b("isto não é uma foto".repeat(4))), u8([0xff, 0xd8, 0xff, 0xe0, 0, 16]), new Uint8Array()]) assert(m.photoSize(x) === null, `${Buffer.from(x).subarray(0, 12).toString("hex")} → not null`);
+  });
   // Send with a storage error halfway (fake R2 + D1 in memory): nothing is lost and a retry finishes it.
   await check("api: Send survives a storage error halfway and a queue outage (originals kept until committed, retry enqueues + commits); a commit lost to the sweep removes its copies, never when the owner is unknown", async () => {
     const sjs = execSync("npx esbuild --bundle --format=esm --platform=neutral --main-fields=module,main --log-level=error", { input: 'export { registerSend } from "./src/api/send.ts"; export { Hono } from "hono";' }).toString();
@@ -1483,6 +1498,68 @@ await check("ui: panel detail at phone width has no horizontal scroll", async ()
   const w = await p.evaluate(() => document.documentElement.scrollWidth);
   await p.screenshot({ path: `${OUT}/panel-detail-mobile.png`, fullPage: true }); await ctx.close();
   assert(w <= 390, `scrollWidth ${w}`);
+});
+// Issue #32: photos shown large right on the detail page (no new tab), lazy, with their space reserved.
+await check("ui: detail photos are large on the page: one fills the column, 2+ a grid keeping their shape (a tall one narrower, never cropped), no new tab, lazy with reserved space, phone width", async () => {
+  // Real photos made by the browser: landscape JPEG, portrait WebP, square PNG (and one landscape for a single-photo message).
+  const gen = await browser.newContext(); const g = await gen.newPage();
+  const make = (w, h, type, hue, label) => g.evaluate(async ([w, h, type, hue, label]) => {
+    const c = Object.assign(document.createElement("canvas"), { width: w, height: h }), x = c.getContext("2d");
+    const gr = x.createLinearGradient(0, 0, w, h); gr.addColorStop(0, `hsl(${hue} 45% 38%)`); gr.addColorStop(1, `hsl(${hue + 40} 50% 18%)`);
+    x.fillStyle = gr; x.fillRect(0, 0, w, h); x.fillStyle = "rgba(255,255,255,.85)"; x.font = `700 ${Math.round(h / 9)}px sans-serif`; x.fillText(label, w * .08, h * .9);
+    const blob = await new Promise((r) => c.toBlob(r, type, .85)); return [...new Uint8Array(await blob.arrayBuffer())];
+  }, [w, h, type, hue, label]).then((a) => Buffer.from(a));
+  const land = await make(1600, 900, "image/jpeg", 25, "Setup 16:9"), port = await make(900, 1200, "image/webp", 200, "Retrato 3:4");
+  const sq = await make(1000, 1000, "image/png", 120, "Quadrada"), solo = await make(1600, 1000, "image/webp", 30, "Mesa");
+  await gen.close();
+  const three = await sendFull("Leo Fotos", wav(2), [land, port, sq]), one = await sendFull("Nina Foto", wav(2), [solo]);
+
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
+  p.on("pageerror", (e) => errors.push(e.message));
+  // Photos held back until the boxes are measured: the space they take must not change when they arrive.
+  let release; const held = new Promise((r) => (release = r));
+  await p.route(`**/painel/arquivo/${three.id}/photo-*`, async (r) => { await held; await r.continue(); });
+  await p.goto(`${BASE}/painel/envio/${three.id}`, { waitUntil: "domcontentloaded" });
+  const imgs = p.locator("#photos img");
+  assert(await imgs.count() === 3, `photos: ${await imgs.count()}`);
+  assert(await p.locator("#photos a, #photos [target]").count() === 0 && await p.locator('[target="_blank"]').count() === 0, "a photo still opens in a new tab");
+  const attrs = await imgs.evaluateAll((els) => els.map((i) => [i.getAttribute("loading"), i.getAttribute("width"), i.getAttribute("height")].join(" ")));
+  assert(JSON.stringify(attrs) === JSON.stringify(["lazy 1600 900", "lazy 900 1200", "lazy 1000 1000"]), `attributes ${attrs}`);
+  const boxes = () => imgs.evaluateAll((els) => els.map((i) => { const r = i.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; }));
+  const before = await boxes(), zipTop = await p.locator("#zip").evaluate((e) => e.getBoundingClientRect().top);
+  release(); await imgs.last().scrollIntoViewIfNeeded();
+  assert(await until(() => imgs.evaluateAll((els) => els.every((i) => i.complete && i.naturalWidth > 0)), 8000), "photos did not load");
+  await p.evaluate(() => scrollTo(0, 0)); const after = await boxes();
+  assert(JSON.stringify(before) === JSON.stringify(after), `layout shifted: ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+  assert(zipTop === await p.locator("#zip").evaluate((e) => e.getBoundingClientRect().top), "side column moved");
+  const col = await p.locator("#photos").evaluate((e) => e.getBoundingClientRect().width);
+  const [a, b, c] = after;
+  // Two columns side by side, large; the odd last photo spans the column; each keeps its shape.
+  assert(a[1] === b[1] && b[0] > a[0] && a[2] >= col / 2 - 12 && a[2] > 300, `grid: ${JSON.stringify(after)} in ${col}`);
+  assert(c[1] > a[1] && c[0] === a[0], `third photo: ${JSON.stringify(c)} in ${col}`);
+  assert(Math.abs(a[3] - a[2] * 9 / 16) <= 2 && Math.abs(b[3] - b[2] * 4 / 3) <= 2 && Math.abs(c[3] - c[2]) <= 2 && Math.abs(c[2] - Math.min(col, 720)) <= 1, `shapes: ${JSON.stringify(after)}`);
+  const shown = await imgs.evaluateAll((els) => els.map((i) => `${i.naturalWidth}x${i.naturalHeight}`));
+  assert(JSON.stringify(shown) === '["1600x900","900x1200","1000x1000"]', `natural sizes ${shown}`);
+  // Clicking a photo opens nothing.
+  await imgs.first().click(); await wait(400);
+  assert(ctx.pages().length === 1 && new URL(p.url()).pathname === `/painel/envio/${three.id}`, "clicking a photo navigated or opened a tab");
+  await p.screenshot({ path: `${OUT}/panel-detail-photos.png`, fullPage: true });
+  // One photo fills the content width.
+  await p.goto(`${BASE}/painel/envio/${one.id}`, { waitUntil: "networkidle" });
+  const single = await p.locator("#photos").evaluate((e) => { const i = e.querySelector("img"), r = i.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height), Math.round(e.parentElement.getBoundingClientRect().width)]; });
+  assert(single[0] === single[2] && Math.abs(single[1] - single[0] * 10 / 16) <= 2, `single photo ${single}`);
+  await ctx.close();
+
+  // Phone width: one photo per row at the full width, no horizontal scroll.
+  const mc = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(mc); const m = await mc.newPage();
+  await m.goto(`${BASE}/painel/envio/${three.id}`, { waitUntil: "networkidle" });
+  const mb = await m.locator("#photos img").evaluateAll((els) => els.map((i) => Math.round(i.getBoundingClientRect().width)));
+  const mcol = await m.locator("#photos").evaluate((e) => Math.round(e.getBoundingClientRect().width)), sw = await m.evaluate(() => document.documentElement.scrollWidth);
+  assert(mb.every((w) => Math.abs(w - mcol) <= 1) && mcol > 340 && sw <= 390, `phone: ${mb} in ${mcol}, scrollWidth ${sw}`);
+  for (const i of await m.locator("#photos img").all()) await i.scrollIntoViewIfNeeded();
+  assert(await until(() => m.locator("#photos img").evaluateAll((els) => els.every((i) => i.complete && i.naturalWidth > 0)), 8000), "phone: photos did not load");
+  await m.evaluate(() => scrollTo(0, 0));
+  await m.screenshot({ path: `${OUT}/panel-detail-photos-mobile.png`, fullPage: true }); await mc.close();
 });
 await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
 await check("ui: record main flow", async () => {
