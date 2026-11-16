@@ -1297,6 +1297,43 @@ await check("ui: panel at phone width has no horizontal scroll", async () => {
   const w = await p.evaluate(() => document.documentElement.scrollWidth); await ctx.close();
   assert(w <= 390, `scrollWidth ${w}`);
 });
+// #30: the whole row opens the submission; tag pills still filter; hover + press feedback; Enter on a focused row;
+// no motion with prefers-reduced-motion.
+await check("ui: clicking anywhere in a panel row (transcript, date) opens the detail; tag pills still filter; Enter on a focused row opens it; hover/press respect reduced motion", async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
+  p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  const detail = (id) => new URL(p.url()).pathname === `/painel/envio/${id}`;
+  const home = async () => { await p.goto(BASE + "/painel", { waitUntil: "networkidle" }); };
+  await home();
+  const row = p.locator('li[data-id="demo-1"]');
+  // Hover state, then the press animation (scale on :active) with motion allowed.
+  await row.hover(); await p.waitForTimeout(250);
+  assert(await row.evaluate((li) => getComputedStyle(li).backgroundColor !== "rgba(0, 0, 0, 0)" && getComputedStyle(li).cursor === "pointer"), "no hover state");
+  await p.screenshot({ path: `${OUT}/panel-row-hover.png` });
+  const box = await row.locator(".said p").boundingBox();
+  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await p.mouse.down(); await p.waitForTimeout(200);
+  const pressed = await row.evaluate((li) => getComputedStyle(li).transform);
+  assert(pressed !== "none" && pressed.startsWith("matrix(0.99"), `no press animation: ${pressed}`);
+  await p.mouse.up(); await p.waitForURL("**/painel/envio/demo-1", { timeout: 5000 });
+  assert(detail("demo-1") && (await p.locator("h1").innerText()).includes("Marina"), `transcript click → ${p.url()}`);
+  // Date and duration cells open it too.
+  await home(); await p.locator('li[data-id="demo-2"] .c-u').click(); await p.waitForURL("**/painel/envio/demo-2", { timeout: 5000 });
+  // A tag pill keeps filtering.
+  await home(); await p.click('li[data-id="demo-1"] .pill >> text=Kafka'); await p.waitForLoadState("networkidle");
+  assert(new URL(p.url()).pathname === "/painel" && new URL(p.url()).searchParams.get("tag") === "Kafka", `tag pill → ${p.url()}`);
+  // Keyboard: the row is focusable, Enter opens it.
+  await home(); await p.locator('li[data-id="demo-3"]').focus(); await p.keyboard.press("Enter");
+  await p.waitForURL("**/painel/envio/demo-3", { timeout: 5000 });
+  await ctx.close();
+  // Reduced motion: no transition and no scale on press.
+  const rctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" }); await offline(rctx); const r = await rctx.newPage();
+  await r.goto(BASE + "/painel", { waitUntil: "networkidle" });
+  const rrow = r.locator('li[data-id="demo-1"]'), rb = await rrow.locator(".c-d").boundingBox();
+  await r.mouse.move(rb.x + 5, rb.y + 5); await r.mouse.down();
+  const still = await rrow.evaluate((li) => [getComputedStyle(li).transform, getComputedStyle(li).transitionDuration]);
+  await r.mouse.move(0, 0); await r.mouse.up(); await rctx.close();
+  assert(still[0] === "none" && /^0s(, 0s)*$/.test(still[1]), `reduced motion still animates: ${still}`);
+});
 await check("ui: panel says \"Transcrevendo…\" before the job runs, then the transcript and tags; dead-lettered or rejected says \"Sem transcrição\"", async () => {
   const id = await sendAudio(markedWav("SLOWJOB"), "Paula Teste");
   const t = await shot("panel-transcribing", "/painel", { width: 1440, height: 900 });
