@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-16 · 🔒 **Deploy: credential failures reach the owner even with a deploy-failed issue open** ([#38](https://github.com/YudiG12/coffee-time/pull/38) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-38))
 - 2026-11-13 · **Notice that the first vlog episode isn't out yet** ([#40](https://github.com/YudiG12/coffee-time/pull/40) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-40))
 - 2026-11-13 · **Show the video's first frame in the start page preview** ([#35](https://github.com/YudiG12/coffee-time/pull/35) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-35))
 - 2026-11-13 · **Record video in the browser** ([#27](https://github.com/YudiG12/coffee-time/pull/27) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-27))
