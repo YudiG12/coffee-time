@@ -645,7 +645,7 @@ const PANEL_CSS = `.top{display:flex;align-items:center;justify-content:space-be
 const panelTop = (user: string) => `<header class="top"><a class="brand" href="/painel">Coffee Time <span class="eyebrow">Painel</span></a><div class="who">${user ? `${esc(user)} · Access` : "local"}</div></header>`;
 const who = (r: { anonymous: number; name: string | null }) => (r.anonymous ? "Anônimo" : r.name || "Sem nome");
 
-// Panel list: docs/design/panel-list.png. Status tabs with counts, tag chips, search in transcripts; filters are links.
+// Panel list: docs/design/panel-list.png. Status tabs with counts, tag chips, instant search; filters are links.
 export const panelPage = (rows: Row[], o: PanelOpts) => {
   const href = (f: { status?: string; tag?: string; q?: string }) => {
     const p = new URLSearchParams(Object.entries({ ...o.filter, ...f }).filter(([, v]) => v) as [string, string][]).toString();
@@ -703,29 +703,58 @@ ${PANEL_CSS}
 ${panelTop(o.user)}
 <main class="panel">
 <div class="head"><div><h1>Envios</h1><p class="fresh" id="fresh"><b>${fresh}</b> ${fresh === 1 ? "envio novo" : "envios novos"}</p></div>
-<form class="search" action="/painel" role="search">${icon(SEARCH, 16)}<input type="search" name="q" value="${esc(o.filter.q)}" placeholder="Buscar nas transcrições" aria-label="Buscar nas transcrições">${o.filter.status ? `<input type="hidden" name="status" value="${esc(o.filter.status)}">` : ""}${o.filter.tag ? `<input type="hidden" name="tag" value="${esc(o.filter.tag)}">` : ""}</form></div>
-<nav class="filters" aria-label="Filtros">${TABS.map(([k, label]) => `<a class="tab" data-status="${k || "all"}" href="${href({ status: k })}"${o.filter.status === k ? ' aria-current="page"' : ""}>${label}${k ? ` <span>${o.counts[k] || 0}</span>` : ""}</a>`).join("")}
+<form class="search" action="/painel" role="search">${icon(SEARCH, 16)}<input type="search" name="q" value="${esc(o.filter.q)}" placeholder="Buscar por nome, transcrição ou tag" aria-label="Buscar por nome, transcrição ou tag" autocomplete="off">${o.filter.status ? `<input type="hidden" name="status" value="${esc(o.filter.status)}">` : ""}${o.filter.tag ? `<input type="hidden" name="tag" value="${esc(o.filter.tag)}">` : ""}</form></div>
+<nav class="filters" id="filters" aria-label="Filtros">${TABS.map(([k, label]) => `<a class="tab" data-status="${k || "all"}" href="${href({ status: k })}"${o.filter.status === k ? ' aria-current="page"' : ""}>${label}${k ? ` <span>${o.counts[k] || 0}</span>` : ""}</a>`).join("")}
 ${o.tags.length ? `<div class="sep"></div><span class="eyebrow">Tags</span>${o.tags.map((t) => `<a class="chip" data-tag="${esc(t)}" href="${href({ tag: o.filter.tag === t ? "" : t })}"${o.filter.tag === t ? ' aria-current="true"' : ""}>${esc(t)}</a>`).join("")}` : ""}</nav>
 <div class="grid cols" aria-hidden="true"><span></span><span class="eyebrow">Quem</span><span class="eyebrow">O que falou</span><span class="eyebrow">Duração</span><span class="eyebrow">Quando</span><span class="eyebrow">Status</span></div>
-${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" data-href="/painel/envio/${esc(encodeURIComponent(r.id))}" class="grid" tabindex="0">
+<div id="results" aria-live="polite" aria-busy="false">${rows.length ? `<ul id="submissions">${rows.map((r) => `<li data-id="${esc(r.id)}" data-href="/painel/envio/${esc(encodeURIComponent(r.id))}" class="grid" tabindex="0">
  <div class="c-t"><a href="/painel/envio/${encodeURIComponent(r.id)}" tabindex="-1" aria-hidden="true">${thumb(r)}</a></div>
  <div class="c-w who"><b><a class="open" href="/painel/envio/${encodeURIComponent(r.id)}" tabindex="-1">${esc(who(r))}</a></b><small>${sub(r)}</small></div>
  <div class="c-x said">${said(r)}</div>
  <div class="c-d dur">${r.duration_s != null ? fmt(r.duration_s) : "–"}</div>
  <div class="c-u date">${esc(when(r.created_at, o.now))}</div>
  <div class="c-s"><span class="status ${esc(r.status)}">${esc(STATUS[r.status] || r.status)}</span></div></li>`).join("")}</ul>`
-    : `<ul id="submissions"></ul><p class="empty">Nenhum envio por aqui.</p>`}
+    : `<ul id="submissions"></ul><p class="empty">${o.filter.q ? `Nenhum envio encontrado para “${esc(o.filter.q)}”. Tente outra palavra ou limpe a busca.` : "Nenhum envio por aqui."}</p>`}</div>
 </main>
 <script>
 // The whole row opens the submission (#30). Links inside it (tag pills filter the list, the name and photo open it)
 // keep their own behavior; selecting transcript text doesn't navigate; Ctrl/Cmd/middle click opens a new tab.
 (() => {
- const list = document.getElementById("submissions");
+ const list = document.getElementById("results"); // the list inside is replaced by the instant search, this box stays
  const open = (li, e) => (e.ctrlKey || e.metaKey || e.button === 1 ? window.open(li.dataset.href, "_blank", "noopener") : location.assign(li.dataset.href));
  const row = (e) => { const li = e.target.closest("li[data-href]"); return li && !e.target.closest("a,button,input") ? li : null; };
  list.addEventListener("click", (e) => { const li = row(e); if (li && !String(getSelection() || "")) open(li, e); });
  list.addEventListener("auxclick", (e) => { const li = row(e); if (li && e.button === 1) open(li, e); });
  list.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("li[data-href]")) { e.preventDefault(); open(e.target, e); } });
+})();
+// Instant search (#31): the list filters as you type (debounced), without reloading the page. The same /painel page is
+// fetched and its list and filters are swapped in, so the server stays the only place that searches; the URL keeps ?q=.
+(() => {
+ const form = document.querySelector("form.search"), input = form.querySelector('input[name="q"]');
+ const results = document.getElementById("results");
+ let timer = 0, ctl = null, last = input.value.trim();
+ const run = async () => {
+  clearTimeout(timer);
+  const q = input.value.trim();
+  if (q === last) return;
+  last = q;
+  const p = new URLSearchParams(new FormData(form)); if (!q) p.delete("q");
+  const url = "/painel" + (p.toString() ? "?" + p : "");
+  if (ctl) ctl.abort();
+  ctl = new AbortController();
+  results.setAttribute("aria-busy", "true");
+  try {
+   const r = await fetch(url, { signal: ctl.signal, headers: { accept: "text/html" } });
+   if (!r.ok) throw new Error(String(r.status));
+   const doc = new DOMParser().parseFromString(await r.text(), "text/html");
+   results.innerHTML = doc.getElementById("results").innerHTML;
+   document.getElementById("filters").innerHTML = doc.getElementById("filters").innerHTML;
+   history.replaceState(null, "", url);
+   results.setAttribute("aria-busy", "false");
+  } catch (e) { if (e.name !== "AbortError") { last = null; results.setAttribute("aria-busy", "false"); } }
+ };
+ input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+ form.addEventListener("submit", (e) => { e.preventDefault(); run(); });
 })();
 </script>`);
 };

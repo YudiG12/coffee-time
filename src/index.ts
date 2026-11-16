@@ -79,15 +79,22 @@ const guard = async (c: any, next: () => Promise<void>) => {
 };
 app.use("/painel/*", guard); app.use("/painel", guard); app.use("/api/panel/*", guard); app.use("/mcp", guard);
 
-const listSubmissions = (db: D1Database, f: { status?: string; tag?: string; q?: string } = {}) => {
+// Lowercase without accents: "João" → "joao", "CARREIRA" → "carreira". SQLite's LIKE folds ASCII only, so search runs here.
+const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+const LIST = 200, SCAN = 5000;
+const listSubmissions = async (db: D1Database, f: { status?: string; tag?: string; q?: string } = {}) => {
   const where = ["status != 'uploading'"], args: string[] = [];
   if (f.status) { where.push("status = ?"); args.push(f.status); }
   if (f.tag) { where.push("EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"); args.push(f.tag); }
-  if (f.q) { where.push("transcript LIKE ?"); args.push(`%${f.q}%`); }
-  return db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags, json_array_length(photo_keys) AS photos FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 200`).bind(...args).all<any>().then((r) => r.results);
+  const q = fold((f.q || "").trim().slice(0, 100));
+  const rows = (await db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags, json_array_length(photo_keys) AS photos FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ${q ? SCAN : LIST}`).bind(...args).all<any>()).results;
+  if (!q) return rows;
+  // Search (#31): the name the panel shows (an anonymous sender's name stays hidden), the transcript and the tags.
+  const hay = (r: any) => fold([r.anonymous ? "Anônimo" : r.name || "", r.transcript || "", ...(JSON.parse(r.tags || "[]") as string[])].join("\n"));
+  return rows.filter((r) => hay(r).includes(q)).slice(0, LIST);
 };
 
-// Panel list (docs/design/panel-list.png): status tabs with counts, the most used tags, search in transcripts.
+// Panel list (docs/design/panel-list.png): status tabs with counts, the most used tags, search (name, transcript, tags).
 // Filters come from the query string (?status=&tag=&q=), so every view is a plain link.
 const PANEL_STATUS = ["new", "favorite", "used"];
 app.get("/painel", async (c) => {
@@ -117,7 +124,7 @@ registerPanel(app); // detail page, files, zip, status/tags, delete (src/panel/d
 
 // MCP (JSON-RPC over HTTP)
 const TOOLS = [
-  { name: "list_submissions", description: "List messages; filter by status (new, favorite, used), tag, or text in the transcript.", inputSchema: { type: "object", properties: { status: { type: "string" }, tag: { type: "string" }, q: { type: "string" } } } },
+  { name: "list_submissions", description: "List messages; filter by status (new, favorite, used), tag, or text in the name, transcript or tags (case- and accent-insensitive).", inputSchema: { type: "object", properties: { status: { type: "string" }, tag: { type: "string" }, q: { type: "string" } } } },
   { name: "get_submission", description: "One message with transcript, tags, media keys and `downloads`: short-lived URLs (15 min) for the media, the audio track of a video and the photos.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   { name: "set_status", description: "Set status to new, favorite or used.", inputSchema: { type: "object", properties: { id: { type: "string" }, status: { type: "string", enum: ["new", "favorite", "used"] } }, required: ["id", "status"] } },
 ];
