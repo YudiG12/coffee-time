@@ -765,7 +765,7 @@ type Detail = { id: string; created_at: string; status: string; kind: string; na
   media_key: string | null; photo_keys: string; transcript: string | null; transcript_error: string | null; tags: string };
 const DOWNLOAD = `<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>`;
 const BACK = `<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>`;
-export const detailPage = (r: Detail | null, o: { user: string; now?: number }) => {
+export const detailPage = (r: Detail | null, o: { user: string; now?: number; sizes?: ({ w: number; h: number } | null)[] }) => {
   const css = `<style>${PANEL_CSS}
 .back{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-size:14px;font-weight:600;text-decoration:none}
 .title{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 16px;margin:16px 0 26px}
@@ -781,7 +781,11 @@ export const detailPage = (r: Detail | null, o: { user: string; now?: number }) 
 video.video{display:block;width:100%;max-height:520px;background:#000;border-radius:4px;border:1px solid var(--line2)}
 .label{display:block;margin:0 0 10px;font-size:11px}.label.accent{color:var(--accent)}
 .transcript{margin:28px 0 0}.transcript p{margin:0;max-width:700px;color:var(--ink2);font-size:17px;line-height:28px}.transcript .none{color:var(--subtle)}
-.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:28px}.photos a{display:block}.photos img{width:160px;height:160px;object-fit:cover;border-radius:4px;display:block;background:#221A14}
+/* Photos large on the page: one fills the column, 2+ make a two-column grid (one column on a phone). The space is
+   reserved from the real size (--r = width/height); a photo taller than 80% of the screen gets narrower, never cropped. */
+.photos{display:grid;gap:12px;margin-top:28px;align-items:start}.photos.grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.photos img{--r:4/3;display:block;width:100%;max-width:calc(80vh * var(--r));height:auto;aspect-ratio:var(--r);object-fit:contain;border-radius:4px;background:#221A14}
+.photos.grid img:last-child:nth-child(odd){grid-column:1/-1}
 aside .group{margin-bottom:22px}
 .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px;border:1px solid var(--line2);border-radius:4px}
 .seg button{height:34px;border:0;border-radius:4px;background:none;color:var(--ink2);font:600 14px Onest,system-ui,sans-serif;cursor:pointer}
@@ -799,7 +803,8 @@ a.btn{text-decoration:none;padding:12px}
 .confirm .row{display:flex;gap:8px}.confirm .btn{padding:10px;font-size:14px}.confirm .btn.del{background:var(--rec);color:var(--on-accent)}
 .msg{min-height:20px;margin-top:10px;color:var(--rec);font-size:13px}
 .notfound{color:var(--muted);margin:28px 0}
-@media (max-width:900px){.detail{grid-template-columns:minmax(0,1fr);gap:28px}.title h1{font-size:28px;line-height:40px}.photos img{width:calc(50vw - 21px);height:calc(50vw - 21px);max-width:160px;max-height:160px}}
+@media (max-width:900px){.detail{grid-template-columns:minmax(0,1fr);gap:28px}.title h1{font-size:28px;line-height:40px}}
+@media (max-width:600px){.photos.grid{grid-template-columns:minmax(0,1fr)}.photos.grid img:last-child:nth-child(odd){grid-column:auto}}
 </style>`;
   if (!r) return layout("Coffee Time · Painel", `${css}${panelTop(o.user)}<main class="panel"><a class="back" href="/painel">${icon(BACK, 16)}Voltar para envios</a><p class="notfound">Envio não encontrado.</p></main>`);
   const id = encodeURIComponent(r.id), file = (f: string) => `/painel/arquivo/${id}/${f}`;
@@ -826,7 +831,9 @@ a.btn{text-decoration:none;padding:12px}
 <div class="detail">
 <section>${player}
 <div class="transcript"><span class="eyebrow label accent">Transcrição</span>${said}</div>
-${photos.length ? `<div class="photos" id="photos">${photos.map((p, i) => `<a href="${file(p)}" target="_blank" rel="noopener"><img src="${file(p)}" alt="Foto ${i + 1}" loading="lazy"></a>`).join("")}</div>` : ""}
+${photos.length ? `<div class="photos${photos.length > 1 ? " grid" : ""}" id="photos">${photos.map((p, i) => {
+  const sz = o.sizes?.[i], wh = sz ? ` width="${sz.w}" height="${sz.h}" style="--r:${sz.w}/${sz.h}"` : "";
+  return `<img src="${file(p)}" alt="Foto ${i + 1}" loading="lazy" decoding="async"${wh}>`; }).join("")}</div>` : ""}
 </section>
 <aside>
 ${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p class="notfound" style="margin:0">Rejeitado: o arquivo não passou na checagem.</p></div>`

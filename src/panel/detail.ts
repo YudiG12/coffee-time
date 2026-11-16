@@ -10,6 +10,7 @@ import type { Hono } from "hono";
 import type { Env } from "../index";
 import { BUCKET, s3Of, URL_TTL } from "../api/drafts";
 import { presign } from "../api/s3";
+import { photoSize } from "../api/sniff";
 import { cleanTagList, MAX_OWNER_TAGS } from "../jobs/transcribe";
 import { detailPage } from "../pages";
 import { zipStream, type ZipEntry } from "./zip";
@@ -61,6 +62,17 @@ const firstBytes = async (bucket: R2Bucket, key: string) => {
   return o ? new Uint8Array(await o.arrayBuffer()) : null;
 };
 
+// A photo's pixel size, so the detail page reserves its space before it loads: the first bytes are enough for
+// PNG, GIF and WebP (what the site sends); a JPEG may carry EXIF before its frame header, so it gets up to 128 KB.
+const sizeOf = async (bucket: R2Bucket, key: string) => {
+  const head = await bucket.get(key, { range: { offset: 0, length: 64 } });
+  const b = head ? new Uint8Array(await head.arrayBuffer()) : null;
+  if (!b) return null;
+  if (b[0] !== 0xff || b[1] !== 0xd8) return photoSize(b);
+  const all = await bucket.get(key, { range: { offset: 0, length: 128 * 1024 } });
+  return all ? photoSize(new Uint8Array(await all.arrayBuffer())) : null;
+};
+
 /** Download URLs for the agent: signed R2 GETs (15 min) in production; the guarded panel route when there are no S3 keys (local dev). */
 export const downloadUrls = async (env: Env, r: Row, origin: string) => {
   const s3 = s3Of(env), out: { expires_in: number | null; media?: string; audio?: string; photos: string[] } = { expires_in: s3 ? URL_TTL : null, photos: [] };
@@ -79,7 +91,8 @@ export const registerPanel = (app: Hono<{ Bindings: Env }>) => {
   app.get("/painel/envio/:id", async (c) => {
     const r = await getRow(c.env.DB, c.req.param("id"));
     if (!r) return c.html(detailPage(null, { user: "" }), 404);
-    return c.html(detailPage(r, { user: c.req.header("cf-access-authenticated-user-email") || "" }));
+    const sizes = await Promise.all((JSON.parse(r.photo_keys || "[]") as string[]).map((k) => sizeOf(c.env.MEDIA, k).catch(() => null)));
+    return c.html(detailPage(r, { user: c.req.header("cf-access-authenticated-user-email") || "", sizes }));
   });
 
   app.get("/painel/arquivo/:id/:file{media|audio|photo-(?:[1-9]|10)}", async (c) => {
