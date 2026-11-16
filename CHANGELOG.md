@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-16 · 🔒 **Photos shown large in the submission detail (#32)** ([#44](https://github.com/YudiG12/coffee-time/pull/44) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-44))
 - 2026-11-16 · **Instant panel search on name, transcript and tags (#31)** ([#43](https://github.com/YudiG12/coffee-time/pull/43) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-43))
 - 2026-11-16 · **Panel: the whole row opens a submission** ([#42](https://github.com/YudiG12/coffee-time/pull/42) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-42))
 - 2026-11-16 · 🔒 **Deploy: credential failures reach the owner even with a deploy-failed issue open** ([#38](https://github.com/YudiG12/coffee-time/pull/38) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-38))
