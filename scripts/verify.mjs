@@ -1297,6 +1297,8 @@ async function searched(p, q) {
 await check("ui: panel search filters as you type without a reload (URL keeps ?q=), matches name, transcript and tags, ignores case and accents; empty result message; clearing restores the list", async () => {
   // A message from "João" (accent in the name), removed at the end.
   d1sql("INSERT INTO submissions (id, created_at, status, kind, name, anonymous, consent_at, duration_s, photo_keys, transcript, tags) VALUES ('demo-joao', datetime('now','-5 days'), 'used', 'audio', 'João Pereira', 0, datetime('now'), 30, '[]', 'Mensagem de teste da busca.', '[]')");
+  // A named-optional message left without a name: the panel shows "Sem nome", so the search finds it by that.
+  d1sql("INSERT INTO submissions (id, created_at, status, kind, name, anonymous, consent_at, duration_s, photo_keys, transcript, tags) VALUES ('demo-noname', datetime('now','-6 days'), 'used', 'audio', NULL, 0, datetime('now'), 20, '[]', 'Outra mensagem.', '[]')");
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); await offline(ctx); const p = await ctx.newPage();
   try {
     p.on("pageerror", (e) => errors.push(e.message)); p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
@@ -1324,6 +1326,10 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     // No reload: the same document (a marker set on load survives), the history entry is rewritten, the links carry the search.
     assert((await p.evaluate(() => window.__same)) === true && (await p.evaluate(() => history.length)) === hist, "page reloaded or history grew");
     assert(new URL(await p.locator(".tab[data-status=favorite]").getAttribute("href"), BASE).searchParams.get("q") === "anonimo", "tabs lost the search");
+    // A blank name is shown as "Sem nome" and found by it (UI and API).
+    // (Earlier checks leave other unnamed messages; named and anonymous ones must not match.)
+    await type("sem nome"); const nn = await ids();
+    assert(nn.includes("demo-noname") && !nn.some((id) => ["demo-1", "demo-2", "demo-3", "demo-joao"].includes(id)) && JSON.stringify(nn) === JSON.stringify(await api_("SEM NOME")), `sem nome: ${nn}`);
     // Empty result: friendly message; clearing the box brings the whole list back.
     await type("xyzzy nada");
     assert((await ids()).length === 0 && (await p.locator(".empty").innerText()).includes("Nenhum envio encontrado para “xyzzy nada”"), `empty: ${await p.locator("#results").innerText()}`);
@@ -1336,7 +1342,7 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     assert(JSON.stringify(await ids()) === '["demo-joao"]' && (await p.inputValue('input[name="q"]')) === "joao", "?q= link");
     // A row from the swapped-in list still opens the detail.
     await type("marina"); await p.locator('li[data-id="demo-1"] .c-u').click(); await p.waitForURL("**/painel/envio/demo-1", { timeout: 5000 });
-  } finally { await ctx.close(); d1sql("DELETE FROM submissions WHERE id = 'demo-joao'"); }
+  } finally { await ctx.close(); d1sql("DELETE FROM submissions WHERE id IN ('demo-joao', 'demo-noname')"); }
 });
 await check("ui: panel at phone width has no horizontal scroll", async () => {
   await shot("panel-mobile", "/painel", { width: 390, height: 844 });

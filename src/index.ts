@@ -1,7 +1,7 @@
 // Coffee Time Worker: public site, panel (Cloudflare Access), MCP (Bearer token), the transcript queue consumer and the hourly sweep. See ARCHITECTURE.md.
 import { Hono } from "hono";
 import { safeEqual, verifyAccess } from "./auth";
-import { panelPage, privacyPage, startPage } from "./pages";
+import { panelPage, privacyPage, startPage, who } from "./pages";
 import { registerDrafts } from "./api/drafts";
 import { registerSend } from "./api/send";
 import { queue, type Job } from "./jobs/transcribe";
@@ -89,8 +89,8 @@ const listSubmissions = async (db: D1Database, f: { status?: string; tag?: strin
   const q = fold((f.q || "").trim().slice(0, 100));
   const rows = (await db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags, json_array_length(photo_keys) AS photos FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ${q ? SCAN : LIST}`).bind(...args).all<any>()).results;
   if (!q) return rows;
-  // Search (#31): the name the panel shows (an anonymous sender's name stays hidden), the transcript and the tags.
-  const hay = (r: any) => fold([r.anonymous ? "Anônimo" : r.name || "", r.transcript || "", ...(JSON.parse(r.tags || "[]") as string[])].join("\n"));
+  // Search (#31): the name the panel shows (who(): "Anônimo" hides an anonymous sender's name, "Sem nome" when blank), the transcript and the tags.
+  const hay = (r: any) => fold([who(r), r.transcript || "", ...(JSON.parse(r.tags || "[]") as string[])].join("\n"));
   return rows.filter((r) => hay(r).includes(q)).slice(0, LIST);
 };
 

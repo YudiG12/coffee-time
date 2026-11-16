@@ -643,7 +643,7 @@ const PANEL_CSS = `.top{display:flex;align-items:center;justify-content:space-be
 .panel{max-width:1440px;margin:0 auto;padding:40px 48px 64px}
 @media (max-width:900px){.top{padding:0 16px}.panel{padding:28px 16px 48px}}`;
 const panelTop = (user: string) => `<header class="top"><a class="brand" href="/painel">Coffee Time <span class="eyebrow">Painel</span></a><div class="who">${user ? `${esc(user)} · Access` : "local"}</div></header>`;
-const who = (r: { anonymous: number; name: string | null }) => (r.anonymous ? "Anônimo" : r.name || "Sem nome");
+export const who = (r: { anonymous: number; name: string | null }) => (r.anonymous ? "Anônimo" : r.name || "Sem nome");
 
 // Panel list: docs/design/panel-list.png. Status tabs with counts, tag chips, instant search; filters are links.
 export const panelPage = (rows: Row[], o: PanelOpts) => {
