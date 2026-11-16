@@ -80,7 +80,6 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 .rec-mic{width:72px;height:72px;border-radius:50%;background:rgba(217,123,108,.1);display:flex;align-items:center;justify-content:center;animation:pulse 1.6s ease-in-out infinite}
 .rec-mic span{width:52px;height:52px;border-radius:50%;background:rgba(217,123,108,.3);color:var(--rec);display:flex;align-items:center;justify-content:center}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(217,123,108,.25)}50%{box-shadow:0 0 0 12px rgba(217,123,108,0)}}
-@media (prefers-reduced-motion:reduce){.rec-mic{animation:none}}
 .cam{display:none;position:relative;width:100%;aspect-ratio:16/9;border-radius:4px;overflow:hidden;background:#1C1611}
 .cam video{width:100%;height:100%;object-fit:contain;display:block;transform:scaleX(-1)}
 .cam .dot{position:absolute;left:10px;top:10px;display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:4px;background:rgba(23,18,14,.8);color:var(--rec);font:600 12px/1 Onest,system-ui,sans-serif}
@@ -148,6 +147,32 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 .remove{margin-top:24px;padding:16px 16px;border:1px solid var(--line2);border-radius:4px;background:#2A2019}
 .remove .eyebrow{color:var(--accent)}.remove p{margin:8px 0 0;color:var(--ink2)}.remove code{font:500 .95em "JetBrains Mono",ui-monospace,monospace}
 .thanks .again{margin-top:auto;background:transparent;border:1px solid var(--line2);color:var(--ink);font-weight:600}
+/* Motion (#34): page entrance, sliding tab, each state panel fades in as it appears, hover/press feedback on every
+   button, pulsing recording indicator. With prefers-reduced-motion nothing moves (last rule of this block). */
+.hero,.card,.vlog{animation:rise .45s cubic-bezier(.2,.8,.2,1) both}.card{animation-delay:.06s}.vlog{animation-delay:.12s}
+.tabs{position:relative}
+.tabs::before{content:"";position:absolute;top:3px;bottom:3px;left:3px;width:calc((100% - 10px) / 2);border-radius:3px;background:var(--ink);transition:transform .25s cubic-bezier(.2,.8,.2,1)}
+.tabs[data-kind="video"]::before{transform:translateX(calc(100% + 4px))}
+.tab{position:relative;z-index:1}.tab[aria-selected="true"]{background:transparent}
+.start[data-state="idle"] .actions,.rec,.ready,.vready,.form,.up[data-state],.thanks,.rec-error.show,.form-error.show{animation:enter .28s ease-out both}
+.up[data-state="done"] .done,.up[data-state="error"] .failed{animation:enter .22s ease-out both}
+.btn.swap #record-icon,.btn.swap #record-label{animation:swap .25s ease-out}
+.bar span{transition:width .2s linear}
+.btn,.tab,.stop,.play-btn,.redo,.add,.switch,.photo button,.consent input{transition:background-color .18s,color .18s,border-color .18s,opacity .18s,filter .18s,transform .1s}
+.btn.primary:hover:not(:disabled),.play-btn:hover{filter:brightness(1.08)}
+.btn.secondary:hover:not(:disabled),.thanks .again:hover{background:#2C221A;border-color:#5C4A3A}
+.tab:hover:not([aria-selected="true"]):not(:disabled){color:var(--ink)}
+.stop:hover{background:rgba(217,123,108,.12)}
+.redo:hover:not(:disabled){opacity:.78}
+.add:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.photo button:hover:not(:disabled){border-color:var(--accent);color:var(--ink)}
+@media (prefers-reduced-motion:no-preference){.btn:active:not(:disabled),.tab:active:not(:disabled),.stop:active,.play-btn:active,.redo:active:not(:disabled),.add:active:not(:disabled),.switch:active:not(:disabled),.photo button:active:not(:disabled){transform:scale(.96)}}
+.cam .dot i{animation:blink 1.2s ease-in-out infinite}
+@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes swap{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.start,.start *,.start *::before,.start *::after{animation:none !important;transition:none !important}}
 @media (min-width:1024px){
  .start[data-state="sent"] .hero{display:flex}
  .start[data-state="sent"] .thanks{min-height:0}.thanks .head img{display:none}.thanks h2{font-size:30px;line-height:36px;margin:0}
@@ -174,7 +199,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  <p>Uma história, uma pergunta, qualquer coisa. Abra seu <span style="white-space:nowrap">coração ${HEART}</span></p></div>
 </section>
 <section class="card" aria-label="Enviar mensagem">
- <div class="tabs" role="tablist">
+ <div class="tabs" role="tablist" data-kind="audio">
   <button class="tab" role="tab" id="tab-audio" data-kind="audio" aria-selected="true">${icon(MIC, 18)}Áudio</button>
   <button class="tab" role="tab" id="tab-video" data-kind="video" aria-selected="false">${icon(VIDEO, 18)}Vídeo</button>
  </div>
@@ -275,6 +300,8 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
   rec.dataset.kind = kind;
   $("record-icon").innerHTML = icons[kind];
   $("record-label").textContent = labels[kind];
+  document.querySelector(".tabs").dataset.kind = kind;
+  rec.classList.remove("swap"); void rec.offsetWidth; rec.classList.add("swap"); // replays the label animation
  };
 
  tabs.forEach((t) => t.addEventListener("click", () => {
