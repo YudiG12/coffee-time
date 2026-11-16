@@ -871,17 +871,19 @@ ${rejected ? `<div class="group"><span class="eyebrow label">Status</span><p cla
   return r.json().catch(() => null);
  };
  const FAIL = "Não deu para salvar. Tente de novo.";
- // Status: the switch moves at once; saves run one after another; a failed save puts back the last saved status.
+ // Status: the switch moves at once; saves run one after another. The switch shows the newest choice still waiting,
+ // else the saved status, so a failed save only drops its own choice (a later one still waiting stays shown).
  const seg = $("status");
- let status = seg?.querySelector('[aria-pressed="true"]')?.dataset.status, pending = 0, sQueue = Promise.resolve();
+ let status = seg?.querySelector('[aria-pressed="true"]')?.dataset.status, choices = [], sQueue = Promise.resolve();
+ const showing = () => (choices.length ? choices[choices.length - 1].k : status);
  const showStatus = (k, pop) => { for (const x of seg.querySelectorAll("button")) { const on = x.dataset.status === k; x.setAttribute("aria-pressed", String(on)); x.classList.remove("pop"); if (on && pop) { void x.offsetWidth; x.classList.add("pop"); } } };
  seg?.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-status]"); if (!b || b.getAttribute("aria-pressed") === "true") return;
-  const want = b.dataset.status; say(""); showStatus(want, true); pending++;
+  const c = { k: b.dataset.status }; say(""); choices.push(c); showStatus(c.k, true);
   sQueue = sQueue.then(async () => {
-   const d = await save({ status: want }); pending--;
+   const d = await save({ status: c.k }), before = showing(); choices = choices.filter((x) => x !== c);
    if (d) status = d.status; else say(FAIL);
-   if (!pending || !d) showStatus(status, !d);
+   if (showing() !== before) showStatus(showing(), !d);
   });
  });
  // Tags: remove with the x, add with "+ tag" (Enter saves, Esc cancels). The list changes at once; saves run one after

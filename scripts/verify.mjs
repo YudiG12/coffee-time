@@ -1545,6 +1545,21 @@ await check("ui: detail actions are instant: status and tags show before the sav
   assert(after.status === "used" && after.tags.includes("Bastidores") && JSON.stringify(await shownTags()) === JSON.stringify(after.tags), `server or tags after the failure: ${JSON.stringify(after)} shown ${await shownTags()}`);
   await p.screenshot({ path: `${OUT}/panel-detail-rollback.png`, fullPage: true });
   hold(false); open();
+  // Two quick status choices where the first save fails: the newer choice, still waiting, stays shown and is saved.
+  await p.unroute(`**/api/panel/submissions/${id}`);
+  const release = [];
+  await p.route(`**/api/panel/submissions/${id}`, async (r) => {
+    if (r.request().method() !== "POST") return r.continue();
+    const body = r.request().postDataJSON(); await new Promise((ok) => release.push(ok));
+    return body.status === "new" ? r.fulfill({ status: 500, body: "" }) : r.continue();
+  });
+  await p.click('#status button[data-status="new"]'); await p.click('#status button[data-status="favorite"]');
+  assert(await pressed() === "Favorito", `latest choice not shown: ${await pressed()}`);
+  assert(await until(async () => release.length === 1, 3000), "first save not sent"); release[0]();
+  assert(await until(async () => (await p.locator("#msg").innerText()).includes("Não deu para salvar"), 3000), "no message for the failed first choice");
+  assert(await pressed() === "Favorito", `a failed earlier save hid the waiting choice: ${await pressed()}`);
+  assert(await until(async () => release.length === 2, 3000), "second save not sent"); release[1]();
+  assert(await until(async () => (await saved()).status === "favorite", 5000) && await pressed() === "Favorito", `latest choice not saved: ${(await saved()).status} shown ${await pressed()}`);
   // Hover and press feedback on the buttons.
   const seg = p.locator('#status button[data-status="new"]'), bg0 = await seg.evaluate((b) => getComputedStyle(b).backgroundColor);
   await seg.hover(); await p.waitForTimeout(300);
