@@ -602,12 +602,14 @@ const offline = async (ctx) => {
   await ctx.setExtraHTTPHeaders({ "cf-connecting-ip": fakeIp() });
 };
 const errors = [];
+// Screenshots pass animations: "disabled": the start page fades states in (#34), so a proof image shows the settled
+// screen, never a half-faded frame (Playwright finishes CSS animations/transitions before the capture).
 const shot = async (name, path, viewport) => {
   const ctx = await browser.newContext({ viewport }); await offline(ctx);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(e.message)); page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   await page.goto(BASE + path, { waitUntil: "networkidle" });
-  await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  await page.screenshot({ animations: "disabled", path: `${OUT}/${name}.png`, fullPage: true });
   const text = await page.locator("body").innerText(); await ctx.close(); return text;
 };
 await check("ui: start page (mobile) shows the record and upload buttons", async () => {
@@ -633,8 +635,8 @@ await check("ui: start page has no overlap at intermediate widths", async () => 
         scroll: document.documentElement.scrollWidth > innerWidth };
     });
     assert(!r.hero, `${tag}: send card overlaps the hero or vlog`); assert(!r.clip, `${tag}: title overflows`); assert(!r.scroll, `${tag}: horizontal scroll`);
-    if (w === 1024 && !font) await p.screenshot({ path: `${OUT}/start-1024.png`, fullPage: true });
-    if (w === 1440 && font) await p.screenshot({ path: `${OUT}/start-1440-fallback-font.png`, fullPage: true });
+    if (w === 1024 && !font) await p.screenshot({ animations: "disabled", path: `${OUT}/start-1024.png`, fullPage: true });
+    if (w === 1440 && font) await p.screenshot({ animations: "disabled", path: `${OUT}/start-1440-fallback-font.png`, fullPage: true });
   }
   await ctx.close();
 });
@@ -656,9 +658,72 @@ await check("ui: start page layout, tabs and icons (mobile + desktop)", async ()
     await p.click("#tab-video");
     assert((await p.locator("#record").innerText()).trim() === "Gravar vídeo", "Video tab did not switch the button");
     assert((await p.getAttribute("#tab-video", "aria-selected")) === "true", "Video tab not selected");
-    await p.screenshot({ path: `${OUT}/start-${desktop ? "desktop" : "mobile"}-video.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/start-${desktop ? "desktop" : "mobile"}-video.png`, fullPage: true });
     await p.click("#tab-audio");
     assert((await p.locator("#record").innerText()).trim() === "Gravar áudio", "Audio tab did not switch back");
+    await ctx.close();
+  }
+});
+// Issue #34: the start page moves: entrance, sliding tab, each state (recording, ready, uploading, thanks) fades in,
+// hover/press feedback, pulsing recording indicator; with prefers-reduced-motion nothing animates at all.
+await check("ui: start page animations (entrance, tabs, states, hover/press, pulse) and none with reduced motion", async () => {
+  const anim = (p, sel, pseudo) => p.locator(sel).first().evaluate((el, ps) => { const c = getComputedStyle(el, ps); return { name: c.animationName, dur: c.animationDuration, tr: c.transitionDuration, transform: c.transform, bg: c.backgroundColor, filter: c.filter, opacity: c.opacity }; }, pseudo || null);
+  const pressOn = async (p, sel) => { const b = await p.locator(sel).boundingBox(); await p.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await p.mouse.down(); await p.waitForTimeout(150);
+    const t = (await anim(p, sel)).transform; await p.mouse.move(2, 2); await p.mouse.up(); return t; };
+  // Every animation/transition under .start, pseudo-elements included (the tab indicator is .tabs::before).
+  const moving = (p) => p.evaluate(() => {
+    const out = [];
+    for (const el of [document.querySelector(".start"), ...document.querySelectorAll(".start *")]) for (const ps of [null, "::before", "::after"]) {
+      const c = getComputedStyle(el, ps);
+      if (c.animationName !== "none" || !/^0s(, 0s)*$/.test(c.transitionDuration)) out.push(`${el.id || el.className || el.tagName}${ps || ""}: ${c.animationName} ${c.transitionDuration}`);
+    }
+    return { styles: out.slice(0, 5), running: document.getAnimations().length };
+  });
+  for (const reduce of [false, true]) {
+    const tag = reduce ? "reduced motion" : "motion";
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ["microphone"], reducedMotion: reduce ? "reduce" : "no-preference" }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+    await p.goto(BASE + "/", { waitUntil: "domcontentloaded" });
+    const seen = {}; // what moved at each step (motion) / proof that nothing did (reduced motion)
+    const step = async (name, sel, keyframes) => {
+      if (reduce) { const m = await moving(p); assert(!m.styles.length && m.running === 0, `${tag}, ${name}: still moves ${JSON.stringify(m)}`); return; }
+      const a = await anim(p, sel); assert(a.name === keyframes && a.dur !== "0s", `${name}: ${sel} animation ${a.name} ${a.dur}`); seen[name] = a.name;
+    };
+    // Entrance: hero, card and "Como fica no vlog" rise in.
+    await step("entrance hero", ".hero", "rise"); await step("entrance card", ".card", "rise"); await step("entrance vlog", ".vlog", "rise");
+    await p.waitForLoadState("networkidle");
+    if (!reduce) { await p.waitForTimeout(700); assert((await anim(p, ".card")).opacity === "1", "card not fully shown after the entrance"); }
+    // Tab switch: the indicator slides (transition on .tabs::before), the button label animates.
+    const before = await anim(p, ".tabs", "::before");
+    if (!reduce) assert(before.tr !== "0s" && before.transform === "none" && before.bg !== "rgba(0, 0, 0, 0)", `tab indicator: ${JSON.stringify(before)}`);
+    await p.click("#tab-video");
+    assert((await p.locator("#record").innerText()).trim() === "Gravar vídeo" && (await anim(p, ".tabs", "::before")).transform !== "none", `${tag}: indicator did not move to Vídeo`);
+    await step("tab label", "#record-label", "swap");
+    if (!reduce) await p.screenshot({ animations: "disabled", path: `${OUT}/start-motion-tab.png` });
+    await p.click("#tab-audio");
+    // Hover and press feedback on the buttons.
+    const up0 = await anim(p, "#upload"); await p.hover("#upload"); await p.waitForTimeout(300); const up1 = await anim(p, "#upload");
+    const rc0 = await anim(p, "#record"); await p.hover("#record"); await p.waitForTimeout(300); const rc1 = await anim(p, "#record");
+    assert(up1.bg !== up0.bg && rc1.filter !== rc0.filter, `${tag}: no hover on the buttons (${up0.bg} → ${up1.bg}, ${rc0.filter} → ${rc1.filter})`);
+    for (const sel of ["#record", "#upload", "#tab-video"]) {
+      const t = await pressOn(p, sel);
+      if (reduce) assert(t === "none", `${tag}: ${sel} scales on press (${t})`); else assert(/^matrix\(0\.9/.test(t), `no press feedback on ${sel}: ${t}`);
+    }
+    if (!reduce) assert((await anim(p, "#upload")).tr !== "0s", "buttons have no transition");
+    // States: recording (panel fades in, the microphone pulses) → ready → uploading → thanks.
+    await p.click("#record"); await p.locator("#recorder").waitFor({ state: "visible", timeout: 5000 });
+    await step("recording", "#recorder", "enter"); await step("pulse", ".rec-mic", "pulse");
+    if (!reduce) await p.screenshot({ animations: "disabled", path: `${OUT}/start-motion-recording.png` });
+    await p.waitForTimeout(1200); await p.click("#stop"); await p.locator("#ready").waitFor({ state: "visible", timeout: 5000 });
+    await step("ready", "#ready", "enter"); await step("form", "#form", "enter");
+    await p.locator("#up[data-state]").waitFor({ state: "attached", timeout: 5000 });
+    await step("uploading", "#up", "enter");
+    await p.locator('#up[data-state="done"]').waitFor({ state: "attached", timeout: 30000 });
+    await step("uploaded", "#up .done", "enter");
+    await p.evaluate(() => { document.querySelector(".start").dataset.state = "sent"; });
+    await step("thanks", "#thanks", "enter");
+    if (reduce) assert(await p.locator("#thanks").isVisible() && (await anim(p, "#thanks")).opacity === "1", "reduced motion: thanks not shown at once");
+    else assert(Object.keys(seen).length === 11, `steps seen: ${Object.keys(seen)}`);
     await ctx.close();
   }
 });
@@ -685,7 +750,7 @@ await check("ui: vlog notice says the first episode is still being recorded, exa
     assert(r.inside && !r.clip && !r.scroll, `${name}: notice overflows (${JSON.stringify(r)})`);
     assert(r.size >= 14 && r.contrast >= 4.5, `${name}: notice not readable (font ${r.size}px, contrast ${r.contrast.toFixed(2)})`);
     await p.locator(".vlog").scrollIntoViewIfNeeded();
-    await p.screenshot({ path: `${OUT}/vlog-notice-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/vlog-notice-${name}.png`, fullPage: true });
     await ctx.close();
   }
 });
@@ -705,7 +770,7 @@ await check("ui: record audio with a fake microphone, stop, ready, re-record (mo
     await p.waitForTimeout(3000);
     const timer = (await p.locator("#timer").innerText()).trim();
     assert(/^0:0[2-4]$/.test(timer), `${name}: timer shows ${timer} after ~3 s`);
-    await p.screenshot({ path: `${OUT}/record-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/record-${name}.png`, fullPage: true });
     await p.click("#stop");
     await p.locator("#ready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
     const ready = await p.locator("#ready").innerText();
@@ -714,7 +779,7 @@ await check("ui: record audio with a fake microphone, stop, ready, re-record (mo
     assert(Number(d.duration) > 2.5 && Number(d.duration) < 5, `${name}: duration ${d.duration}`);
     assert(Number(d.bytes) > 1000 && /opus|webm|ogg|mp4/.test(d.type), `${name}: recording is empty (${d.bytes} bytes, ${d.type})`);
     assert((await p.locator("#ready-time").innerText()).trim() === "0:03", `${name}: ready time ${await p.locator("#ready-time").innerText()}`);
-    await p.screenshot({ path: `${OUT}/ready-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/ready-${name}.png`, fullPage: true });
     await p.click("#tab-audio");
     assert(await p.locator("#ready[data-duration]").isVisible(), `${name}: clicking the selected Áudio tab discarded the recording`);
     await p.click("#play"); await p.waitForTimeout(600);
@@ -795,7 +860,7 @@ await check("ui: record video with a fake camera: live preview, stop, Vídeo pro
     await p.waitForTimeout(3000);
     const timer = (await p.locator("#timer").innerText()).trim();
     assert(/^0:0[2-4]$/.test(timer), `${name}: timer shows ${timer} after ~3 s`);
-    await p.screenshot({ path: `${OUT}/record-video-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/record-video-${name}.png`, fullPage: true });
     await p.click("#stop");
     await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 5000 });
     const v = (await p.locator("#vready").innerText()).replace(/\s+/g, " ");
@@ -813,7 +878,7 @@ await check("ui: record video with a fake camera: live preview, stop, Vídeo pro
     const id = await p.getAttribute("#up", "data-draft");
     assert(r2get(`incoming/${id}/media`).length > 1000, `${name}: recorded video not uploaded`);
     await p.waitForTimeout(300);
-    await p.screenshot({ path: `${OUT}/record-video-ready-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/record-video-ready-${name}.png`, fullPage: true });
     await p.click("#vplay"); await p.waitForTimeout(600);
     assert(await p.evaluate(() => { const x = document.getElementById("vplayer"); return !x.paused && x.currentTime > 0; }), `${name}: recorded video does not play`);
     await p.click("#vplayer");
@@ -853,7 +918,7 @@ await check("ui: camera denied shows a message in Portuguese and goes back to id
   assert(msg === "Não foi possível usar a câmera. Verifique a permissão do navegador.", `message "${msg}"`);
   assert((await p.getAttribute("main", "data-state")) === "idle" && (await p.locator("#record").isVisible()) && !(await p.locator("#record").isDisabled()), "not back to idle");
   assert(!(await p.locator("#tab-audio").isDisabled()), "tabs still locked");
-  await p.screenshot({ path: `${OUT}/record-video-denied-mobile.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/record-video-denied-mobile.png`, fullPage: true });
   await ctx.close();
 });
 // "Envie um arquivo": a WAV generated here and WebM fixtures in scripts/fixtures/ (made with ffmpeg, see README there).
@@ -882,7 +947,7 @@ await check("ui: upload a short audio and a short video, see the ready state (mo
     await p.click("#play"); await p.waitForTimeout(500);
     assert(await p.evaluate(() => !document.getElementById("player").paused), `${name}: uploaded audio does not play`);
     await p.click("#play"); await p.waitForTimeout(300);
-    await p.screenshot({ path: `${OUT}/upload-audio-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/upload-audio-${name}.png`, fullPage: true });
     // "Trocar áudio" picks another file; a video switches to the Video tab and its preview.
     const [c2] = await Promise.all([p.waitForEvent("filechooser", { timeout: 3000 }), p.click("#redo")]);
     await c2.setFiles(FX.video);
@@ -896,7 +961,7 @@ await check("ui: upload a short audio and a short video, see the ready state (mo
     assert(!/anonimiz/i.test(body), `${name}: anonymize option shown for a video`);
     assert(!/\p{Extended_Pictographic}/u.test(body), `${name}: emoji in the video state`);
     assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${name}: horizontal scroll`);
-    await p.screenshot({ path: `${OUT}/upload-video-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/upload-video-${name}.png`, fullPage: true });
     await p.click("#vplay"); await p.waitForTimeout(500);
     assert(await p.evaluate(() => { const x = document.getElementById("vplayer"); return !x.paused && x.currentTime > 0; }), `${name}: video does not play`);
     await p.click("#vplayer");
@@ -946,7 +1011,7 @@ await check("ui: a picked or recorded video shows its first frame before play, a
       await p.waitForTimeout(200);
       const diff = await frameDiff(p);
       assert(diff > 8, `${name}/${how}: preview looks blank (mean difference ${diff.toFixed(1)} from the empty box)`);
-      await p.screenshot({ path: `${OUT}/video-thumbnail-${how}-${name}.png`, fullPage: true });
+      await p.screenshot({ animations: "disabled", path: `${OUT}/video-thumbnail-${how}-${name}.png`, fullPage: true });
       await p.click("#vplay"); await p.waitForTimeout(600);
       const pl = await p.evaluate(() => { const v = document.getElementById("vplayer"); return { paused: v.paused, start: v.played.length ? v.played.start(0) : -1 }; });
       assert(!pl.paused && pl.start >= 0 && pl.start < 0.05, `${name}/${how}: play did not start from the beginning ${JSON.stringify(pl)}`);
@@ -964,7 +1029,7 @@ await check("ui: a file longer than 90 s (or not audio/video) is refused with a 
     await p.locator("#rec-error.show").waitFor({ state: "visible", timeout: 8000 });
     assert((await p.locator("#rec-error").innerText()).trim() === msg, `${f.name}: message "${await p.locator("#rec-error").innerText()}"`);
     assert((await p.getAttribute("main", "data-state")) === "idle", `${f.name}: long file was accepted`);
-    if (f === FX.videoLong) await p.screenshot({ path: `${OUT}/upload-too-long-mobile.png`, fullPage: true });
+    if (f === FX.videoLong) await p.screenshot({ animations: "disabled", path: `${OUT}/upload-too-long-mobile.png`, fullPage: true });
     await p.evaluate(() => document.getElementById("rec-error").classList.remove("show"));
   }
   await p.setInputFiles("#file", FX.text);
@@ -993,14 +1058,14 @@ await check("ui: a picked file uploads in the background (progress, Arquivo carr
     assert(await p.evaluate(() => window.__tsKey) === TS_SITE, `${name}: Turnstile rendered with ${await p.evaluate(() => window.__tsKey)}`);
     const row = (await p.locator("#up").innerText()).replace(/\s+/g, " ");
     assert(/Carregando vídeo \d+%/.test(row), `${name}: progress row: ${row}`);
-    await p.screenshot({ path: `${OUT}/upload-progress-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/upload-progress-${name}.png`, fullPage: true });
     release();
     await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
     assert((await p.locator("#up").innerText()).trim() === "Arquivo carregado", `${name}: done text: ${await p.locator("#up").innerText()}`);
     assert(!/\p{Extended_Pictographic}/u.test(await p.locator("body").innerText()), `${name}: emoji in the upload state`);
     const id = await p.getAttribute("#up", "data-draft");
     assert(r2get(`incoming/${id}/media`).equals(FX.video.buffer), `${name}: uploaded object differs from the file`);
-    await p.screenshot({ path: `${OUT}/upload-done-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/upload-done-${name}.png`, fullPage: true });
     // A recording uploads too, as a new draft.
     await ctx.grantPermissions(["microphone"]);
     await p.click("#tab-audio"); assert(!(await p.locator("#up").isVisible()), `${name}: upload row kept after discarding the video`);
@@ -1020,7 +1085,7 @@ await check("ui: a failed upload says so and \"Tentar de novo\" finishes it", as
   await p.locator("#up[data-state=error]").waitFor({ state: "visible", timeout: 15000 });
   const t = (await p.locator("#up").innerText()).replace(/\s+/g, " ");
   assert(t.includes("Não foi possível carregar o arquivo.") && t.includes("Tentar de novo"), `error text: ${t}`);
-  await p.screenshot({ path: `${OUT}/upload-error-mobile.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/upload-error-mobile.png`, fullPage: true });
   fail = false; await p.click("#up-retry");
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
   await ctx.close();
@@ -1073,7 +1138,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
     assert((await p.locator("#photo-count").innerText()).trim() === "2 / 10 fotos", `${name}: count ${await p.locator("#photo-count").innerText()}`);
     await p.click("#consent");
     assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${name}: horizontal scroll`);
-    await p.screenshot({ path: `${OUT}/form-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/form-${name}.png`, fullPage: true });
     const id = await p.getAttribute("#up", "data-draft");
     await p.click("#send");
     await p.locator("#thanks").waitFor({ state: "visible", timeout: 10000 });
@@ -1082,7 +1147,7 @@ await check("ui: Enviar needs consent, Anonimizar voz hides the name, photos, se
     assert(await p.locator("#thanks h2 svg").count() === 1 && !/\p{Extended_Pictographic}/u.test(th), `${name}: thanks icon / emoji`);
     assert((await p.locator(".hero").isVisible()) === desktop, `${name}: hero ${desktop ? "hidden" : "shown"} on the thanks screen`);
     assert(!(await p.locator("#form").isVisible()) && !(await p.locator(".tabs").isVisible()), `${name}: form or tabs still visible after Send`);
-    await p.screenshot({ path: `${OUT}/thanks-${name}.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/thanks-${name}.png`, fullPage: true });
     const row = await mcpData("get_submission", { id });
     assert(row.status === "new" && row.name === "Marina Souza" && row.anonymous === 0 && JSON.parse(row.photo_keys).length === 2 && row.consent_at, `${name}: saved ${JSON.stringify(row)}`);
     assert((await api("/api/panel/submissions?status=new")).body.some((x) => x.id === id), `${name}: not in the panel as new`);
@@ -1097,7 +1162,7 @@ await check("ui: anonymous audio is saved without a name; a video has no Anonimi
   await p.setInputFiles("#file", FX.video);
   await p.locator("#vready[data-duration]").waitFor({ state: "visible", timeout: 8000 });
   assert(!(await p.locator("#anon").isVisible()) && (await p.locator("#name").isVisible()), "video: Anonimizar voz shown or name hidden");
-  await p.screenshot({ path: `${OUT}/form-video-mobile.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/form-video-mobile.png`, fullPage: true });
   await p.click("#tab-audio"); await p.setInputFiles("#file", FX.audio);
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
   await p.fill("#name", "Fulano"); await p.click("#anon"); await p.click("#consent");
@@ -1161,7 +1226,7 @@ await check("ui: anonymous audio is distorted in the browser (pitch 220 → ~172
   assert((await p.getAttribute("#up", "data-draft")) === id, "a new draft was created instead of replacing the file");
   const stored = r2get(`incoming/${id}/media`), { f0, duration } = await pitchOf(p, stored);
   assert(!stored.equals(VOICE.buffer) && f0 > 150 && f0 < 190 && Math.abs(duration - 3) < 0.2, `distorted: f0 ${f0.toFixed(1)} Hz, ${duration.toFixed(2)} s, ${stored.length} bytes`);
-  await p.screenshot({ path: `${OUT}/anon-distorted-mobile.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/anon-distorted-mobile.png`, fullPage: true });
   // With the switch on, a new file is distorted before its first upload: the original never goes up.
   const before = puts.length, OTHER = { ...VOICE, name: "outra.wav", buffer: voiceWav(2.5, 200) };
   const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.click("#redo")]); await chooser.setFiles(OTHER);
@@ -1180,7 +1245,7 @@ await check("ui: a 4K video is re-encoded to ≤ 1920 px wide and its audio trac
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 60000 });
   assert((await p.locator("#vstatus").innerText()).trim() === "Vídeo pronto · 1080p", `status ${await p.locator("#vstatus").innerText()}`);
   assert(!(await p.locator("#up-note").isVisible()), "warning shown with WebCodecs");
-  await p.screenshot({ path: `${OUT}/video-4k-compressed-desktop.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/video-4k-compressed-desktop.png`, fullPage: true });
   await p.fill("#name", "Teste 4K");
   const row = await sendForm(p);
   const video = r2get(row.media_key), size = await mediaSize(p, video, "video/mp4");
@@ -1216,7 +1281,7 @@ await check("ui: without WebCodecs a video goes up as picked with a short warnin
   await p.setInputFiles("#file", FX4K);
   await p.locator("#up[data-state=uploading][data-draft]").waitFor({ state: "visible", timeout: 10000 });
   assert((await p.locator("#up-note").innerText()).trim() === "Seu navegador não comprime vídeos. O envio pode demorar mais.", `note: ${await p.locator("#up-note").innerText()}`);
-  await p.screenshot({ path: `${OUT}/video-no-webcodecs-mobile.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/video-no-webcodecs-mobile.png`, fullPage: true });
   release();
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 10000 });
   const row = await sendForm(p);
@@ -1292,14 +1357,14 @@ await check("ui: panel list as in the design: first photo or icon, columns, \"N 
   await p.click('li[data-id="demo-1"] .pill >> text=Kafka'); await p.waitForLoadState("networkidle"); // a row's tag pill is a filter link
   assert(JSON.stringify(await ids()) === '["demo-1"]', `tag Kafka: ${await ids()}`);
   assert(await p.locator('.chip[data-tag="Kafka"][aria-current]').count() === 1, "active tag not marked");
-  await p.screenshot({ path: `${OUT}/panel-filter-tag.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-filter-tag.png`, fullPage: true });
   await p.click('.chip[data-tag="Kafka"]'); await p.waitForLoadState("networkidle"); // a second click clears it
   assert((await ids()).length === all.length, "tag not cleared");
   // Search in transcripts, combined with a status
   await p.fill('input[name="q"]', "Lisboa"); await p.press('input[name="q"]', "Enter"); await searched(p, "Lisboa");
   const lisboa = (await api("/api/panel/submissions?q=Lisboa")).body.map((x) => x.id), found = await ids();
   assert(found.includes("demo-3") && !found.includes("demo-1") && JSON.stringify(found) === JSON.stringify(lisboa), `q=Lisboa: ${found}`);
-  await p.screenshot({ path: `${OUT}/panel-search.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-search.png`, fullPage: true });
   await p.click(".tab[data-status=favorite]"); await p.waitForLoadState("networkidle");
   assert((await ids()).length === 0 && (await p.locator(".empty").innerText()).includes("Nenhum envio"), "q + status should be empty");
   assert(new URL(p.url()).searchParams.get("q") === "Lisboa", "status tab dropped the search");
@@ -1325,7 +1390,7 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     await type("joao");
     assert(JSON.stringify(await ids()) === '["demo-joao"]', `joao: ${await ids()}`);
     assert(JSON.stringify(await api_("joao")) === '["demo-joao"]' && JSON.stringify(await api_("JOÃO")) === '["demo-joao"]', "api name search");
-    await p.screenshot({ path: `${OUT}/panel-search-instant.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/panel-search-instant.png`, fullPage: true });
     // Name without accents (another sender), the transcript, a tag, case-insensitive.
     await type("MARINA"); const mar = await ids();
     assert(mar.includes("demo-1") && !mar.includes("demo-2") && !mar.includes("demo-3") && JSON.stringify(mar) === JSON.stringify(await api_("marina")), `MARINA: ${mar}`);
@@ -1344,7 +1409,7 @@ await check("ui: panel search filters as you type without a reload (URL keeps ?q
     // Empty result: friendly message; clearing the box brings the whole list back.
     await type("xyzzy nada");
     assert((await ids()).length === 0 && (await p.locator(".empty").innerText()).includes("Nenhum envio encontrado para “xyzzy nada”"), `empty: ${await p.locator("#results").innerText()}`);
-    await p.screenshot({ path: `${OUT}/panel-search-empty.png`, fullPage: true });
+    await p.screenshot({ animations: "disabled", path: `${OUT}/panel-search-empty.png`, fullPage: true });
     await p.fill('input[name="q"]', ""); await searched(p, "");
     assert(JSON.stringify(await ids()) === JSON.stringify(all), `cleared: ${await ids()}`);
     assert(!new URL(p.url()).searchParams.has("q"), `URL after clearing: ${p.url()}`);
@@ -1374,7 +1439,7 @@ await check("ui: clicking anywhere in a panel row (transcript, date) opens the d
   // Hover state, then the press animation (scale on :active) with motion allowed.
   await row.hover(); await p.waitForTimeout(250);
   assert(await row.evaluate((li) => getComputedStyle(li).backgroundColor !== "rgba(0, 0, 0, 0)" && getComputedStyle(li).cursor === "pointer"), "no hover state");
-  await p.screenshot({ path: `${OUT}/panel-row-hover.png` });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-row-hover.png` });
   const box = await row.locator(".said p").boundingBox();
   await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await p.mouse.down(); await p.waitForTimeout(200);
   const pressed = await row.evaluate((li) => getComputedStyle(li).transform);
@@ -1439,7 +1504,7 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   assert(!/\p{Extended_Pictographic}/u.test(await p.locator("body").innerText()), "emoji in the detail page");
   await p.evaluate(() => document.getElementById("audio").currentTime = 1.5);
   await p.waitForTimeout(300);
-  await p.screenshot({ path: `${OUT}/panel-detail.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail.png`, fullPage: true });
 
   // The message sent above (2 photos): status, tags, zip, delete.
   await p.goto(`${BASE}/painel/envio/${id}`, { waitUntil: "networkidle" });
@@ -1470,7 +1535,7 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   const [dl] = await Promise.all([p.waitForEvent("download"), p.click("#zip")]);
   const zf = await dl.path(), files = unzip(readFileSync(zf));
   assert(files["audio.wav"]?.equals(detailMsg.audio) && files["foto-1.png"] && files["transcricao.txt"].toString().includes(STUB_TRANSCRIPT), `downloaded zip: ${Object.keys(files)}`);
-  await p.screenshot({ path: `${OUT}/panel-detail-edited.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-edited.png`, fullPage: true });
   // Apagar envio (#33): the button itself turns into "Confirmar exclusão" (danger style, no browser dialog, no extra box);
   // a click elsewhere or 4 s put it back; confirming animates the page out and goes back to the list.
   const del = p.locator("#delete");
@@ -1479,7 +1544,7 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   await del.click(); const anim0 = await look(); await p.waitForTimeout(300); const on = { ...(await look()), anim: anim0.anim };
   assert(on.text === "Confirmar exclusão" && on.armed && on.bg !== idle.bg && on.anim === "arm" && await p.locator("#confirm").count() === 0, `armed: ${JSON.stringify(on)} idle ${JSON.stringify(idle)}`);
   assert((await p.locator("#delete-hint").innerText()).includes("somem para sempre"), "no hint under the armed button");
-  await p.waitForTimeout(250); await p.screenshot({ path: `${OUT}/panel-detail-delete-confirm.png`, fullPage: true });
+  await p.waitForTimeout(250); await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-delete-confirm.png`, fullPage: true });
   await p.click("#transcript"); const back = await look();
   assert(back.text === "Apagar envio" && !back.armed && !(await p.locator("#delete-hint").isVisible()) && await panelRow(id), `click elsewhere: ${JSON.stringify(back)}`);
   await del.click(); assert((await look()).armed, "not armed again");
@@ -1495,7 +1560,7 @@ await check("ui: panel detail as in the design: player, transcript, photos, stat
   // A video plays in a <video>; an unknown id says so.
   await p.goto(`${BASE}/painel/envio/demo-3`, { waitUntil: "networkidle" });
   assert(await p.locator("video#video").evaluate((v) => v.readyState >= 1 || new Promise((r) => { v.onloadedmetadata = () => r(true); v.onerror = () => r(false); setTimeout(() => r(false), 5000); })), "video did not load");
-  await p.screenshot({ path: `${OUT}/panel-detail-video.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-video.png`, fullPage: true });
   const nf = await fetch(`${BASE}/painel/envio/nope`); assert(nf.status === 404 && (await nf.text()).includes("Envio não encontrado"), "unknown id");
   await ctx.close();
 });
@@ -1527,7 +1592,7 @@ await check("ui: detail actions are instant: status and tags show before the sav
   assert((await shownTags()).includes("Bastidores") && await p.locator('#tags .tag[data-tag="Bastidores"]').evaluate((t) => getComputedStyle(t).animationName) === "pop", `added tag not shown at once: ${await shownTags()}`);
   await p.click('#tags .tag[data-tag="Rotina"] button');
   assert(!(await shownTags()).includes("Rotina") && !(await saved()).tags.includes("Bastidores"), `removed tag still shown: ${await shownTags()}`);
-  await p.screenshot({ path: `${OUT}/panel-detail-instant.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-instant.png`, fullPage: true });
   open();
   assert(await until(async () => { const s = await saved(); return s.status === "used" && s.tags.includes("Bastidores") && !s.tags.includes("Rotina"); }, 8000), `held saves: ${JSON.stringify(await saved())}`);
   await wait(300);
@@ -1543,7 +1608,7 @@ await check("ui: detail actions are instant: status and tags show before the sav
   assert(await until(async () => (await p.locator("#msg").innerText()).includes("Não deu para salvar"), 3000), "no message after a failed save");
   const after = await saved();
   assert(after.status === "used" && after.tags.includes("Bastidores") && JSON.stringify(await shownTags()) === JSON.stringify(after.tags), `server or tags after the failure: ${JSON.stringify(after)} shown ${await shownTags()}`);
-  await p.screenshot({ path: `${OUT}/panel-detail-rollback.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-rollback.png`, fullPage: true });
   hold(false); open();
   // Two quick status choices where the first save fails: the newer choice, still waiting, stays shown and is saved.
   await p.unroute(`**/api/panel/submissions/${id}`);
@@ -1598,7 +1663,7 @@ await check("ui: panel detail at phone width has no horizontal scroll", async ()
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx); const p = await ctx.newPage();
   await p.goto(BASE + "/painel/envio/demo-1", { waitUntil: "networkidle" });
   const w = await p.evaluate(() => document.documentElement.scrollWidth);
-  await p.screenshot({ path: `${OUT}/panel-detail-mobile.png`, fullPage: true }); await ctx.close();
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-mobile.png`, fullPage: true }); await ctx.close();
   assert(w <= 390, `scrollWidth ${w}`);
 });
 // Issue #32: photos shown large right on the detail page (no new tab), lazy, with their space reserved.
@@ -1645,7 +1710,7 @@ await check("ui: detail photos are large on the page: one fills the column, 2+ a
   // Clicking a photo opens nothing.
   await imgs.first().click(); await wait(400);
   assert(ctx.pages().length === 1 && new URL(p.url()).pathname === `/painel/envio/${three.id}`, "clicking a photo navigated or opened a tab");
-  await p.screenshot({ path: `${OUT}/panel-detail-photos.png`, fullPage: true });
+  await p.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-photos.png`, fullPage: true });
   // One photo fills the content width.
   await p.goto(`${BASE}/painel/envio/${one.id}`, { waitUntil: "networkidle" });
   const single = await p.locator("#photos").evaluate((e) => { const i = e.querySelector("img"), r = i.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height), Math.round(e.parentElement.getBoundingClientRect().width)]; });
@@ -1661,7 +1726,7 @@ await check("ui: detail photos are large on the page: one fills the column, 2+ a
   for (const i of await m.locator("#photos img").all()) await i.scrollIntoViewIfNeeded();
   assert(await until(() => m.locator("#photos img").evaluateAll((els) => els.every((i) => i.complete && i.naturalWidth > 0)), 8000), "phone: photos did not load");
   await m.evaluate(() => scrollTo(0, 0));
-  await m.screenshot({ path: `${OUT}/panel-detail-photos-mobile.png`, fullPage: true }); await mc.close();
+  await m.screenshot({ animations: "disabled", path: `${OUT}/panel-detail-photos-mobile.png`, fullPage: true }); await mc.close();
 });
 await check("ui: no console errors", async () => assert(errors.length === 0, errors.slice(0, 3).join(" | ")));
 await check("ui: record main flow", async () => {
