@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-17 · **Animations on the start page (#34)** ([#46](https://github.com/YudiG12/coffee-time/pull/46) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-46))
 - 2026-11-16 · 🔒 **Instant feedback and animations in the submission detail (#33)** ([#45](https://github.com/YudiG12/coffee-time/pull/45) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-45))
 - 2026-11-16 · 🔒 **Photos shown large in the submission detail (#32)** ([#44](https://github.com/YudiG12/coffee-time/pull/44) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-44))
 - 2026-11-16 · **Instant panel search on name, transcript and tags (#31)** ([#43](https://github.com/YudiG12/coffee-time/pull/43) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-43))
