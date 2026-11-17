@@ -647,7 +647,7 @@ await check("ui: start page layout, tabs and icons (mobile + desktop)", async ()
     const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
     await p.goto(BASE + "/", { waitUntil: "networkidle" });
     const t = await p.locator("body").innerText();
-    for (const s of ["Envie uma mensagem", "Uma história, uma pergunta", "Áudio", "Vídeo", "Áudio ou vídeo de até 90 segundos.", "Gravar áudio", "Envie um arquivo", "Como fica no vlog", "Eu ouço a mensagem no café"]) assert(t.toLowerCase().includes(s.toLowerCase()), `${vp.width}px: missing "${s}"`);
+    for (const s of ["Envie uma mensagem", "Uma história, uma pergunta", "Áudio", "Vídeo", "Áudio ou vídeo de até 90 segundos.", "Gravar áudio", "Envie um arquivo", "Como fica no vlog"]) assert(t.toLowerCase().includes(s.toLowerCase()), `${vp.width}px: missing "${s}"`);
     assert(!/\p{Extended_Pictographic}/u.test(t), `${vp.width}px: emoji in the page text`);
     for (const sel of ["#record", "#upload", "#tab-audio", "#tab-video"]) assert(await p.locator(`${sel} svg`).count() === 1, `${sel} has no inline SVG icon`);
     assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${vp.width}px: horizontal scroll`);
@@ -727,8 +727,8 @@ await check("ui: start page animations (entrance, tabs, states, hover/press, pul
     await ctx.close();
   }
 });
-// Issue #29: "Como fica no vlog" says the first episode isn't out yet; the thumbnail stays, marked "Exemplo".
-await check("ui: vlog notice says the first episode is still being recorded, example marked (mobile + desktop)", async () => {
+// Issue #29: "Como fica no vlog" says the first episode isn't out yet (the example clip is gone since #41).
+await check("ui: vlog notice says the first episode is still being recorded (mobile + desktop)", async () => {
   for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
     const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
     const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
@@ -737,10 +737,6 @@ await check("ui: vlog notice says the first episode is still being recorded, exa
     assert(await soon.isVisible(), `${name}: notice not visible`);
     assert((await soon.innerText()).trim() === "O primeiro episódio ainda está sendo gravado. Em breve aparece aqui.", `${name}: notice text: ${await soon.innerText()}`);
     assert(await p.locator("#vlog-soon svg").count() === 1, `${name}: notice has no icon`);
-    const ex = p.locator(".vlog .thumb #vlog-example");
-    assert(await p.locator(".vlog .thumb").isVisible() && await ex.isVisible(), `${name}: example thumbnail or its tag missing`);
-    assert((await ex.innerText()).trim().toLowerCase() === "exemplo", `${name}: example tag text`);
-    assert(/exemplo/i.test(await p.getAttribute(".vlog .thumb", "aria-label")), `${name}: thumbnail label does not say it is an example`);
     const r = await p.evaluate(() => {
       const el = document.getElementById("vlog-soon"), b = el.getBoundingClientRect(), v = document.querySelector(".vlog").getBoundingClientRect(), cs = getComputedStyle(el);
       const lum = (c) => { const [r, g, b] = c.match(/\d+(\.\d+)?/g).slice(0, 3).map((x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
@@ -751,6 +747,29 @@ await check("ui: vlog notice says the first episode is still being recorded, exa
     assert(r.size >= 14 && r.contrast >= 4.5, `${name}: notice not readable (font ${r.size}px, contrast ${r.contrast.toFixed(2)})`);
     await p.locator(".vlog").scrollIntoViewIfNeeded();
     await p.screenshot({ animations: "disabled", path: `${OUT}/vlog-notice-${name}.png`, fullPage: true });
+    await ctx.close();
+  }
+});
+// Issue #41: while the notice is shown, "Como fica no vlog" is only the heading and the notice: no example clip,
+// no "Exemplo" badge, no play button, no "Eu ouço a mensagem…" line.
+await check("ui: vlog section shows only the heading and the notice, no example clip (mobile + desktop)", async () => {
+  for (const [vp, name] of [[{ width: 390, height: 844 }, "mobile"], [{ width: 1440, height: 900 }, "desktop"]]) {
+    const ctx = await browser.newContext({ viewport: vp }); await offline(ctx);
+    const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(e.message));
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    assert(await p.locator(".vlog #vlog-soon").isVisible(), `${name}: notice not visible`);
+    assert((await p.locator(".vlog .eyebrow").innerText()).trim().toLowerCase() === "como fica no vlog", `${name}: heading changed`);
+    const r = await p.evaluate(() => {
+      const v = document.querySelector(".vlog"), shown = (e) => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+      const kids = [...v.children].filter(shown).map((e) => e.className || e.tagName);
+      return { kids, text: v.innerText.trim(), page: document.body.innerText, bad: [...v.querySelectorAll(".thumb, .play, .example, #vlog-example, [role=img], img, video, svg:not(#vlog-soon svg)")].filter(shown).length };
+    });
+    assert(r.kids.length === 2 && r.kids[0] === "eyebrow" && r.kids[1] === "soon", `${name}: vlog section has more than heading + notice: ${JSON.stringify(r.kids)}`);
+    assert(r.bad === 0, `${name}: example clip, badge or play button still in the vlog section`);
+    assert(!/exemplo/i.test(r.text) && !/Eu ouço a mensagem/i.test(r.page), `${name}: example text still on the page`);
+    assert(/^como fica no vlog\s+O primeiro episódio ainda está sendo gravado\. Em breve aparece aqui\.$/i.test(r.text), `${name}: vlog text: ${r.text}`);
+    await p.locator(".vlog").scrollIntoViewIfNeeded();
+    await p.screenshot({ animations: "disabled", path: `${OUT}/vlog-no-example-${name}.png`, fullPage: true });
     await ctx.close();
   }
 });
