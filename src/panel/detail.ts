@@ -19,7 +19,7 @@ export const STATUSES = ["new", "favorite", "used"];
 
 export type Row = {
   id: string; created_at: string; status: string; kind: "audio" | "video"; name: string | null; anonymous: number;
-  duration_s: number | null; media_key: string | null; audio_key: string | null; photo_keys: string; transcript: string | null;
+  duration_s: number | null; media_key: string | null; audio_key: string | null; thumb_key?: string | null; photo_keys: string; transcript: string | null;
   transcript_error: string | null; tags: string;
 };
 const getRow = (db: D1Database, id: string) =>
@@ -159,7 +159,7 @@ export const registerPanel = (app: Hono<{ Bindings: Env }>) => {
     if (!r) return c.json({ error: "not found" }, 404);
     // Files first: if R2 fails, the row stays and the owner can try again. Strays under the message's prefixes go too.
     const keys = new Set(filesOf(r).map(([, k]) => k));
-    for (const k of [r.media_key, r.audio_key]) if (k) keys.add(k);
+    for (const k of [r.media_key, r.audio_key, r.thumb_key]) if (k) keys.add(k);
     for (const prefix of [`media/${r.id}/`, `incoming/${r.id}/`]) for (const o of (await c.env.MEDIA.list({ prefix })).objects) keys.add(o.key);
     if (keys.size) await c.env.MEDIA.delete([...keys]);
     await c.env.DB.prepare("DELETE FROM submissions WHERE id = ?").bind(r.id).run();

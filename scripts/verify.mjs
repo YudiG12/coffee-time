@@ -530,6 +530,38 @@ await check("api: Apagar envio deletes the R2 objects and the row", async () => 
   assert((await fetch(`${BASE}/painel/envio/${id}`)).status === 404, "detail of a deleted message");
 });
 
+// #50: a video's frame, uploaded with the draft, is the panel list thumbnail when there are no photos.
+const putThumb = async (id, buf = PNG, type = "image/png") => {
+  const t = await post(`/api/drafts/${id}/files`, { file: "thumb", type, size: buf.length });
+  assert(t.status === 201 && t.body.key === `incoming/${id}/thumb`, `thumb → ${t.status} ${JSON.stringify(t.body)}`);
+  assert((await putFile(t.body.upload.url, buf, type)) === 200, "thumb upload failed");
+};
+await check("api: a video's frame (#50) — thumb only for videos, an image ≤ 20 MB; Send moves it to media/<id>/thumb (thumb_key, not a photo); missing → 409, junk → 422; served at /painel/miniatura/:id with the type from the bytes; Apagar envio deletes it", async () => {
+  const a = await newDraft("audio", wav(1), "audio/wav"), v = await newDraft("video", VIDEO_FX, "video/webm");
+  for (const [id, b] of [[a.id, { file: "thumb", type: "image/png", size: 10 }], [v.id, { file: "thumb", type: "video/webm", size: 10 }], [v.id, { file: "thumb", type: "image/webp", size: 20 * 1024 * 1024 + 1 }], [v.id, { file: "thumb", type: "image/webp", size: 0 }]]) {
+    const r = await post(`/api/drafts/${id}/files`, b); assert(r.status === 400, `${JSON.stringify(b)} → ${r.status}`);
+  }
+  await putFile(v.upload.url, VIDEO_FX, "video/webm");
+  const early = await post(`/api/drafts/${v.id}/send`, { consent: true, thumb: true }); assert(early.status === 409, `thumb missing → ${early.status}`);
+  await putThumb(v.id);
+  const r = await post(`/api/drafts/${v.id}/send`, { consent: true, thumb: true, name: "Quadro API" }); assert(r.status === 200, `send → ${r.status}`);
+  const row = await mcpData("get_submission", { id: v.id });
+  assert(row.thumb_key === `media/${v.id}/thumb` && row.photo_keys === "[]" && r2get(row.thumb_key).equals(PNG) && !r2has(`incoming/${v.id}/thumb`), `thumb_key ${row.thumb_key} photo_keys ${row.photo_keys}`);
+  const m = await fetch(`${BASE}/painel/miniatura/${v.id}`);
+  assert(m.status === 200 && m.headers.get("content-type") === "image/png" && Buffer.from(await m.arrayBuffer()).equals(PNG), `miniatura → ${m.status} ${m.headers.get("content-type")}`);
+  assert((await fetch(`${BASE}/painel/foto/${v.id}`)).status === 404, "a frame served as a photo");
+  assert((await panelRow(v.id))?.thumb === 1 && (await panelRow("demo-3"))?.thumb === 0 && (await panelRow("demo-2"))?.thumb === 0, "list `thumb` flag");
+  for (const id of ["demo-3", "demo-2", "nope"]) assert((await fetch(`${BASE}/painel/miniatura/${id}`)).status === 404, `miniatura of ${id}`);
+  // A text file posing as the frame is refused like any other file; an audio message never keeps one.
+  const v2 = await newDraft("video", VIDEO_FX, "video/webm"); await putFile(v2.upload.url, VIDEO_FX, "video/webm"); await putThumb(v2.id, Buffer.alloc(200, 65), "image/webp");
+  const r2 = await post(`/api/drafts/${v2.id}/send`, { consent: true, thumb: true });
+  assert(r2.status === 422 && JSON.stringify(r2.body.files) === '["thumb"]' && !r2has(`incoming/${v2.id}/thumb`), `fake thumb → ${r2.status} ${JSON.stringify(r2.body)}`);
+  await putFile(a.upload.url, wav(1), "audio/wav");
+  assert((await post(`/api/drafts/${a.id}/send`, { consent: true, thumb: true })).status === 200 && (await mcpData("get_submission", { id: a.id })).thumb_key === null, "audio message with thumb_key");
+  // Apagar envio takes the frame with the other files.
+  assert((await del(`/api/panel/submissions/${v.id}`)).status === 200 && !r2has(`media/${v.id}/thumb`) && !r2has(`media/${v.id}/media`), "frame left after Apagar envio");
+  assert((await fetch(`${BASE}/painel/miniatura/${v.id}`)).status === 404, "miniatura of a deleted message");
+});
 // ---- Hourly sweep (ADR 0002): wrangler dev --test-scheduled exposes the Cron at /__scheduled. Drafts are made
 // through the API, then aged in the local D1, so each rule is hit by a draft of the right age.
 const d1sql = (sql) => sh(`npx wrangler d1 execute coffee-time --local --persist-to ${STATE} --command "${sql}"`);
@@ -588,6 +620,20 @@ await check("api: hourly sweep finishes unconfirmed sends, rejects junk, deletes
   const cRow = await rowOf(claimed.id);
   assert(late.status === 404 && cRow?.status === "uploading" && cRow.send_request === null && !r2has(`media/${claimed.id}/media`), `send of a claimed draft → ${late.status} ${cRow?.status}`);
   sweptId = ok.id;
+});
+
+await check("api: the hourly sweep deletes a video's frame (#50) with the other files: a draft after 24 h, a failed send after 7 days", async () => {
+  const stale = await newDraft("video", VIDEO_FX, "video/webm"); await putFile(stale.upload.url, VIDEO_FX, "video/webm"); await putThumb(stale.id); age(stale.id, "-25 hours");
+  // Enviar pressed, the video never finished uploading; a copy of the frame already in media/ (storage error halfway).
+  const failed = await newDraft("video", VIDEO_FX, "video/webm"); await putThumb(failed.id);
+  assert((await post(`/api/drafts/${failed.id}/send`, { consent: true, thumb: true })).status === 409, "send without the video");
+  const f = `.verify/thumb-${Date.now()}.png`; writeFileSync(f, PNG);
+  sh(`npx wrangler r2 object put "coffee-time-media/media/${failed.id}/thumb" --local --persist-to ${STATE} --file ${f}`);
+  assert(r2has(`media/${failed.id}/thumb`) && r2has(`incoming/${failed.id}/thumb`) && r2has(`incoming/${stale.id}/thumb`), "setup");
+  age(failed.id, "-8 days", "-8 days");
+  await runSweep();
+  assert(!(await rowOf(stale.id)) && !r2has(`incoming/${stale.id}/thumb`) && !r2has(`incoming/${stale.id}/media`), "24 h draft: frame left");
+  assert(!(await rowOf(failed.id)) && !r2has(`incoming/${failed.id}/thumb`) && !r2has(`media/${failed.id}/thumb`), "7-day failed send: frame left");
 });
 
 // ---- Screens ----
@@ -1506,6 +1552,49 @@ await check("ui: panel at phone width has no horizontal scroll", async () => {
   const w = await p.evaluate(() => document.documentElement.scrollWidth); await ctx.close();
   assert(w <= 390, `scrollWidth ${w}`);
 });
+// #50: a video without photos shows a frame of itself in the panel list; photos still win; old videos and audio keep the icon.
+await check("ui: a video sent without photos shows its frame in the panel list (WebP ≤ 2000 px); with photos the first photo; an old video and an audio keep the icon (desktop + phone)", async () => {
+  const sendVideo = async (name, photos = []) => {
+    const { ctx, p } = await newPage();
+    const thumbs = []; await p.route("**/api/drafts/*/thumb", (r) => { if (r.request().method() === "PUT") thumbs.push(r.request().postDataBuffer()); return r.continue(); });
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    await p.setInputFiles("#file", FX.video);
+    if (photos.length) await p.setInputFiles("#photo-file", photos);
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 60000 });
+    await p.fill("#name", name);
+    const row = await sendForm(p); await ctx.close();
+    return { row, thumbs };
+  };
+  const { row: plain, thumbs } = await sendVideo("Quadro Vídeo");
+  assert(thumbs.length === 1 && plain.thumb_key === `media/${plain.id}/thumb` && plain.photo_keys === "[]", `thumb_key ${plain.thumb_key}, ${thumbs.length} uploads`);
+  const stored = r2get(plain.thumb_key);
+  assert(stored.subarray(0, 4).toString() === "RIFF" && stored.subarray(8, 12).toString() === "WEBP", "stored frame is not WebP");
+  const { row: withPhoto } = await sendVideo("Vídeo Com Foto", [PHOTOS[0]]);
+  assert(withPhoto.thumb_key === `media/${withPhoto.id}/thumb` && JSON.parse(withPhoto.photo_keys).length === 1, `with photo: ${withPhoto.thumb_key} ${withPhoto.photo_keys}`);
+  for (const [vp, tag] of [[{ width: 1440, height: 900 }, "desktop"], [{ width: 390, height: 844 }, "mobile"]]) {
+    const { ctx, p } = await newPage(vp);
+    await p.goto(BASE + "/painel", { waitUntil: "networkidle" });
+    const loaded = (li) => li.locator("img.thumb").evaluate((i) => (i.complete ? Promise.resolve() : new Promise((r) => { i.onload = i.onerror = r; })).then(() => ({ w: i.naturalWidth, h: i.naturalHeight, src: i.getAttribute("src"), frame: i.hasAttribute("data-frame") })));
+    const f = await loaded(p.locator(`li[data-id="${plain.id}"]`));
+    assert(f.frame && f.src === `/painel/miniatura/${plain.id}` && f.w > 100 && f.w <= 2000 && f.h > 50, `${tag}: frame ${JSON.stringify(f)}`);
+    // Not a blank box: the frame has real picture in it (pixels vary).
+    const spread = await p.locator(`li[data-id="${plain.id}"] img.thumb`).evaluate((i) => {
+      const c = document.createElement("canvas"); c.width = 32; c.height = 32; const g = c.getContext("2d"); g.drawImage(i, 0, 0, 32, 32);
+      const d = g.getImageData(0, 0, 32, 32).data; let lo = 255, hi = 0; for (let k = 0; k < d.length; k += 4) { const y = (d[k] + d[k + 1] + d[k + 2]) / 3; lo = Math.min(lo, y); hi = Math.max(hi, y); } return hi - lo;
+    });
+    assert(spread > 20, `${tag}: frame looks blank (luma spread ${spread})`);
+    const ph = await loaded(p.locator(`li[data-id="${withPhoto.id}"]`));
+    assert(!ph.frame && ph.src === `/painel/foto/${withPhoto.id}`, `${tag}: video with photos ${JSON.stringify(ph)}`);
+    for (const [id, kind] of [["demo-3", "video"], ["demo-2", "audio"]]) {
+      const li = p.locator(`li[data-id="${id}"]`);
+      assert(await li.locator("img").count() === 0 && await li.locator(`.thumb.icon[data-kind=${kind}] svg`).count() === 1, `${tag}: ${id} lost its ${kind} icon`);
+    }
+    assert((await p.evaluate(() => document.documentElement.scrollWidth)) <= vp.width, `${tag}: horizontal scroll`);
+    await p.locator(`li[data-id="${plain.id}"]`).scrollIntoViewIfNeeded();
+    await p.screenshot({ animations: "disabled", path: `${OUT}/panel-video-frame-${tag}.png` });
+    await ctx.close();
+  }
+});
 // #30: the whole row opens the submission; tag pills still filter; hover + press feedback; Enter on a focused row;
 // no motion with prefers-reduced-motion.
 await check("ui: clicking anywhere in a panel row (transcript, date) opens the detail; tag pills still filter; Enter on a focused row opens it; hover/press respect reduced motion", async () => {
@@ -1841,6 +1930,11 @@ await browser.close();
       const r = await fetch(B2 + "/api/panel/submissions/demo-1", { method, headers: { "content-type": "application/json" }, body: method === "POST" ? '{"status":"used"}' : undefined }).then((x) => x.status).catch(() => 0);
       assert(r === 401, `${method} /api/panel/submissions/demo-1 → ${r}`);
     }
+  });
+  await check("auth: the video frame route (#50) is behind the panel guard like /painel/foto/:id", async () => {
+    for (const p of ["/painel/miniatura/demo-3", "/painel/miniatura/nope"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
+    for (const h of ["Bearer wrong", `Bearer ${TOKEN}x`]) { const st = await get("/painel/miniatura/demo-3", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
+    const st = await get("/painel/miniatura/demo-3", { authorization: `Bearer ${TOKEN}` }); assert(st === 404, `correct Bearer → ${st} (demo-3 has no frame)`);
   });
   await check("auth: wrong / empty Bearer → 401", async () => {
     for (const h of ["Bearer wrong", "Bearer ", `Bearer ${TOKEN}x`]) { const st = await post("/mcp", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }

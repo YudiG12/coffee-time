@@ -1,6 +1,6 @@
 // Drafts (ADR 0002): as soon as there is media, the browser asks for a draft and uploads straight to R2 `incoming/<id>/`.
 // POST /api/drafts checks Turnstile and a per-IP rate limit, inserts the submission as `uploading` and returns
-// short-lived signed URLs. POST /api/drafts/:id/photos and /files add photos, the audio track of a video, or replace
+// short-lived signed URLs. POST /api/drafts/:id/photos and /files add photos, the audio track or a frame of a video, or replace
 // the media (distorted voice). Locally (no S3 secrets, DEV_OPEN on localhost) the upload goes through a Worker route instead.
 import type { Hono } from "hono";
 import type { Env } from "../index";
@@ -108,13 +108,16 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
   // - `media` again: the browser replaces the file in place, e.g. with the distorted voice once "Anonimizar voz" is on,
   //   so the original is overwritten in incoming/ and never reaches media/ (R2 keeps no old versions).
   // - `audio`: the audio track of a video, extracted in the browser for the transcription.
+  // - `thumb`: a frame of a video (#50), the panel list's thumbnail when the message has no photos; an image like a photo.
   app.post("/api/drafts/:id/files", async (c) => {
     const b = await c.req.json<any>().catch(() => null);
     const file = b?.file, type = String(b?.type || ""), size = b?.size;
-    if ((file !== "media" && file !== "audio") || type.length > 100 || !Number.isInteger(size) || size < 1) return c.json({ error: "invalid file" }, 400);
+    if (!["media", "audio", "thumb"].includes(file) || type.length > 100 || !Number.isInteger(size) || size < 1) return c.json({ error: "invalid file" }, 400);
     const id = c.req.param("id"), row = await openDraft(c.env.DB, id);
     if (!row) return c.json({ error: "not found" }, 404);
-    const ok = file === "media" ? type.startsWith(row.kind + "/") && size <= MAX_BYTES : row.kind === "video" && type.startsWith("audio/") && size <= MAX_TRACK_BYTES;
+    const ok = file === "media" ? type.startsWith(row.kind + "/") && size <= MAX_BYTES
+      : file === "audio" ? row.kind === "video" && type.startsWith("audio/") && size <= MAX_TRACK_BYTES
+      : row.kind === "video" && type.startsWith("image/") && size <= MAX_PHOTO_BYTES;
     if (!ok) return c.json({ error: "invalid file" }, 400);
     const s3 = s3Of(c.env), dev = isLocalDev(c.env, c.req.url);
     if (!s3 && !dev) return c.json({ error: "uploads not configured" }, 503);
@@ -123,11 +126,11 @@ export const registerDrafts = (app: Hono<{ Bindings: Env }>) => {
 
   // Local dev only: stands in for the signed URLs when the S3 secrets are absent. Never active in production.
   // Files arrive while the draft is open (24 h): in production each one needs a fresh signed URL from the routes above.
-  app.put("/api/drafts/:id/:file{media|audio|photo-(?:[1-9]|10)}", async (c) => {
+  app.put("/api/drafts/:id/:file{media|audio|thumb|photo-(?:[1-9]|10)}", async (c) => {
     if (s3Of(c.env) || !isLocalDev(c.env, c.req.url)) return c.json({ error: "not found" }, 404);
     const id = c.req.param("id"), file = c.req.param("file");
     if (!(await openDraft(c.env.DB, id))) return c.json({ error: "not found" }, 404);
-    const max = file === "media" ? MAX_BYTES : file === "audio" ? MAX_TRACK_BYTES : MAX_PHOTO_BYTES;
+    const max = file === "media" ? MAX_BYTES : file === "audio" ? MAX_TRACK_BYTES : MAX_PHOTO_BYTES; // thumb and photos
     const body = await c.req.arrayBuffer();
     if (!body.byteLength || body.byteLength > max) return c.json({ error: "invalid size" }, 400);
     await c.env.MEDIA.put(`incoming/${id}/${file}`, body, { httpMetadata: { contentType: c.req.header("content-type") || "application/octet-stream" } });

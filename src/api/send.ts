@@ -1,6 +1,6 @@
 // Send (ADR 0002): POST /api/drafts/:id/send turns an `uploading` draft into a message.
 // For every file in `incoming/<id>/` it checks the size (HEAD) and the real type (magic bytes of the first 4 KB),
-// (media, the audio track of a video when the browser sent one, photos), then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
+// (media, the audio track and the frame of a video when the browser sent them, photos), then copies the files to `media/<id>/` (originals deleted once committed), saves name, anonymous flag and consent, and sets status `new`.
 // It enqueues the transcript job on JOBS just before committing (a queue error → 503, nothing committed).
 // A file that fails the check deletes the draft's files and marks it `rejected`. A file not uploaded yet → 409.
 // What the subscriber chose is saved first (`send_request`), so the hourly sweep (src/jobs/sweep.ts) can finish a
@@ -18,8 +18,9 @@ const HEAD_BYTES = 4096;
 
 export type Draft = { id: string; kind: "audio" | "video"; media_key: string };
 // The choices made on the form, already cleaned (consent is implied: no request is saved without it).
-export type SendRequest = { name: string | null; anonymous: boolean; track: boolean; photos: number[] };
-type File = { from: string; to: string; kind: "audio" | "video" | "photo"; max: number };
+// `thumb` is optional: requests saved before #50 have none.
+export type SendRequest = { name: string | null; anonymous: boolean; track: boolean; thumb?: boolean; photos: number[] };
+type File = { from: string; to: string; kind: "audio" | "video" | "photo"; max: number; thumb?: true };
 
 // Size from HEAD; real type from the first 4 KB only (never the whole file).
 const head = async (bucket: R2Bucket, key: string) => {
@@ -51,10 +52,12 @@ type Result = { status: 200 | 404 | 409 | 422 | 503; body: Record<string, unknow
 // Check, move, enqueue, commit. Shared by the Send route and the hourly sweep; every outcome but 200/422 leaves the
 // draft `uploading` with its files in incoming/, so it can be tried again.
 export const finishSend = async (env: SendEnv, draft: Draft, req: SendRequest): Promise<Result> => {
-  const db = env.DB, bucket = env.MEDIA, id = draft.id, { name, anonymous, track } = req;
+  const db = env.DB, bucket = env.MEDIA, id = draft.id, { name, anonymous, track } = req, thumb = draft.kind === "video" && req.thumb === true;
   const files: File[] = [
     { from: draft.media_key, to: `media/${id}/media`, kind: draft.kind, max: MAX_BYTES },
     ...(track ? [{ from: `incoming/${id}/audio`, to: `media/${id}/audio`, kind: "audio" as const, max: MAX_TRACK_BYTES }] : []),
+    // The video's frame (#50) is checked like a photo.
+    ...(thumb ? [{ from: `incoming/${id}/thumb`, to: `media/${id}/thumb`, kind: "photo" as const, max: MAX_PHOTO_BYTES, thumb: true as const }] : []),
     ...[...req.photos].sort((x, y) => x - y).map((n) => ({ from: `incoming/${id}/photo-${n}`, to: `media/${id}/photo-${n}`, kind: "photo" as const, max: MAX_PHOTO_BYTES })),
   ];
   const heads = await Promise.all(files.map((f) => head(bucket, f.from)));
@@ -72,9 +75,9 @@ export const finishSend = async (env: SendEnv, draft: Draft, req: SendRequest): 
   // the job: Send answers 503 and stays retryable. A job that arrives before the commit is retried by the consumer.
   try { await env.JOBS.send({ id }); }
   catch (e) { console.log(`enqueue ${id} failed: ${(e as Error)?.message || e}`); return { status: 503, body: { error: "queue" } }; }
-  const photoKeys = files.filter((f) => f.kind === "photo").map((f) => f.to);
-  const r = await db.prepare(`UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, photo_keys = ?, send_request = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`)
-    .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, JSON.stringify(photoKeys), id).run();
+  const photoKeys = files.filter((f) => f.kind === "photo" && !f.thumb).map((f) => f.to);
+  const r = await db.prepare(`UPDATE submissions SET status = 'new', consent_at = datetime('now'), name = ?, anonymous = ?, media_key = ?, audio_key = ?, thumb_key = ?, photo_keys = ?, send_request = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`)
+    .bind(name, anonymous ? 1 : 0, files[0].to, track ? `media/${id}/audio` : null, thumb ? `media/${id}/thumb` : null, JSON.stringify(photoKeys), id).run();
   if (!r.meta.changes) {
     // Lost the draft meanwhile (sent by another request, or claimed by the sweep): drop the copies made above only
     // once D1 says no message owns them (row gone, or still a draft). Status unknown (lookup failed) → keep them:
@@ -106,7 +109,8 @@ export const registerSend = (app: Hono<{ Bindings: Env }>) => {
     const anonymous = draft.kind === "audio" && b.anonymous === true;
     const name = anonymous ? null : String(b.name || "").replace(/\s+/g, " ").trim().slice(0, MAX_NAME) || null;
     // `track: true`: the browser uploaded the audio track of the video (ADR 0003) and it must be there too.
-    const req: SendRequest = { name, anonymous, track: draft.kind === "video" && b.track === true, photos: photos as number[] };
+    // `thumb: true`: the browser uploaded a frame of the video (#50) for the panel list.
+    const req: SendRequest = { name, anonymous, track: draft.kind === "video" && b.track === true, thumb: draft.kind === "video" && b.thumb === true, photos: photos as number[] };
     // Saved before anything can fail, so the sweep can finish this send if the browser never hears back.
     await db.prepare(`UPDATE submissions SET send_request = ?, send_at = datetime('now'), sweep_at = NULL WHERE id = ? AND status = 'uploading' AND ${CLAIMED}`).bind(JSON.stringify(req), id).run();
     const r = await finishSend(c.env, draft, req);
