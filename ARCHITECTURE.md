@@ -16,7 +16,7 @@
 
 Not used: KV, Durable Objects, Pages, Stream.
 
-**Limits of this design.** One audio or one video (≤ 90 s) and up to 10 photos per message. Browsers without WebCodecs upload the original, up to 300 MB. Free on Cloudflare until about 10 GB of media (~200 videos), then about US$ 0.015 per GB per month. Deletion requests are handled by hand.
+**Limits of this design.** One audio or one video (≤ 90 s) and up to 10 photos per message. Browsers without WebCodecs upload the original, up to 300 MB (its audio track is still copied out for the transcript). Free on Cloudflare until about 10 GB of media (~200 videos), then about US$ 0.015 per GB per month. Deletion requests are handled by hand.
 
 ## Flows
 

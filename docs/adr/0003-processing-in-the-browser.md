@@ -30,5 +30,6 @@ In the browser, as soon as a file is picked or recorded:
 
 - ~6x smaller uploads, near-instant **Send**.
 - The original anonymous voice never leaves the device.
-- Old browsers without WebCodecs upload the original (up to 300 MB) with a warning.
+- Old browsers without WebCodecs upload the original (up to 300 MB) with a warning. The audio track still goes up: its
+  packets are copied into an .m4a/.webm without re-encoding, which needs no WebCodecs (also when a conversion fails, #48).
 - Distortion quality needs an ear test before launch.

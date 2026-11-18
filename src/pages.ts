@@ -46,7 +46,8 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "
 // Browser-side media work (ADR 0003, src/site/media.ts → /media.js, loaded on the first file): before each upload
 // anonymous audio is distorted, a video is re-encoded to 1080p ~5 Mbps with its audio track uploaded alongside, and
 // photos become ≤ 2000 px WebP. Turning "Anonimizar voz" on (or off) replaces the file in the same draft.
-// Without WebCodecs a video goes up as picked, with a short warning.
+// Without WebCodecs (or when the conversion fails) a video goes up as picked (with a short warning when there is no WebCodecs),
+// and its audio track is still copied out and uploaded for the transcript (#48).
 // Video recording (Vídeo tab): camera + microphone with a live preview above the timer (same 90 s limit and Stop as audio),
 // then the same "Vídeo pronto" state as a picked video, with "Regravar", and the same background upload.
 export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<style>
@@ -468,10 +469,12 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
   if (kind === "audio" && anon) { label("Preparando áudio"); return { blob: await (await media()).distortVoice(src) }; }
   if (kind !== "video") return { blob: src };
   const m = await media().catch(() => null);
-  if (!m || !m.hasWebCodecs()) { $("up-note").hidden = false; return { blob: src }; }
+  // The original goes up (no WebCodecs, or the conversion failed): its audio track still goes up for the transcript (#48).
+  const original = async () => ({ blob: src, track: m ? await m.extractAudio(src).catch(() => null) : null });
+  if (!m || !m.hasWebCodecs()) { $("up-note").hidden = false; return original(); }
   label("Preparando vídeo");
   const v = await m.compressVideo(src, (p) => my === job && progress(p)).catch(() => null);
-  if (!v) return { blob: src };
+  if (!v) return original();
   if (my === job && v.video !== src) { $("vstatus").textContent = "Vídeo pronto · " + v.height + "p"; $("vready").dataset.height = String(v.height); }
   return { blob: v.video, track: v.track };
  };
