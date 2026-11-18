@@ -4,6 +4,7 @@
 
 ### Added
 
+- 2026-11-18 · **Send a video's audio track even when the video can't be converted (#48)** ([#49](https://github.com/YudiG12/coffee-time/pull/49) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-49))
 - 2026-11-17 · **Hide the example clip while the first-episode notice is shown (#41)** ([#47](https://github.com/YudiG12/coffee-time/pull/47) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-47))
 - 2026-11-17 · **Animations on the start page (#34)** ([#46](https://github.com/YudiG12/coffee-time/pull/46) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-46))
 - 2026-11-16 · 🔒 **Instant feedback and animations in the submission detail (#33)** ([#45](https://github.com/YudiG12/coffee-time/pull/45) · [release with GIF/screens](https://github.com/YudiG12/coffee-time/releases/tag/pr-45))
