@@ -2,11 +2,13 @@
 // with import("/media.js"). Nothing here runs on the server.
 // - distortVoice: anonymous audio, pitch and formants shifted before upload, so the original voice never leaves the device.
 // - compressVideo: 1080p at ~5 Mbps with WebCodecs (Mediabunny), plus its audio track as a separate file for transcription.
+// - extractAudio: a video's audio track, copied without re-encoding, so it also goes up when the video can't be converted.
 // - toWebp: photos resized to ≤ 2000 px WebP.
-// Without WebCodecs (old browsers) compressVideo returns null and the page uploads the original with a warning.
+// Without WebCodecs (old browsers) compressVideo returns null and the page uploads the original with a warning
+// (and still the audio track, from extractAudio).
 import {
-  ADTS, FLAC, MATROSKA, MP3, MP4, OGG, QTFF, WAVE, WEBM, AudioBufferSource, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, WebMOutputFormat,
-  canEncodeAudio, canEncodeVideo,
+  ADTS, FLAC, MATROSKA, MP3, MP4, OGG, QTFF, WAVE, WEBM, AudioBufferSource, BlobSource, BufferTarget, Conversion, EncodedAudioPacketSource,
+  EncodedPacketSink, Input, Mp4OutputFormat, Output, WebMOutputFormat, canEncodeAudio, canEncodeVideo, type InputAudioTrack,
 } from "mediabunny";
 
 export const VIDEO_BITRATE = 5_000_000;
@@ -163,17 +165,48 @@ export async function compressVideo(file: Blob, onProgress?: (p: number) => void
   return !scaled && video.size >= file.size ? { video: file, width: vt.displayWidth, height: vt.displayHeight, track } : { video, width, height, track };
 }
 
-/** The audio track alone, for transcription: Opus in WebM (or AAC in MP4). Null when the video has no audio. */
+/** The audio track alone, for transcription. Null when the video has no audio.
+ *  The packets are copied as they are (AAC into MP4/.m4a, Opus or Vorbis into WebM): no decoding or encoding, so it
+ *  works without WebCodecs and when the video conversion failed (issue #48). Only a codec neither container can hold
+ *  is re-encoded (Opus in WebM, or AAC in MP4), which needs WebCodecs. */
 export async function extractAudio(file: Blob): Promise<Blob | null> {
   const input = new Input({ source: new BlobSource(file), formats: FORMATS });
-  if (!(await input.getPrimaryAudioTrack())) return null;
+  const at = await input.getPrimaryAudioTrack();
+  if (!at) return null;
+  const copied = await copyAudio(at).catch(() => null);
+  if (copied) return copied;
+  return hasWebCodecs() ? reencodeAudio(input) : null;
+}
+
+const copyAudio = async (at: InputAudioTrack): Promise<Blob | null> => {
+  const codec = at.codec;
+  if (!codec) return null;
+  const webm = new WebMOutputFormat(), mp4 = new Mp4OutputFormat();
+  const format = codec !== "aac" && webm.getSupportedAudioCodecs().includes(codec) ? webm : mp4.getSupportedAudioCodecs().includes(codec) ? mp4 : null;
+  const decoderConfig = format && (await at.getDecoderConfig());
+  if (!format || !decoderConfig) return null;
+  const output = new Output({ format, target: new BufferTarget() });
+  const src = new EncodedAudioPacketSource(codec);
+  output.addAudioTrack(src);
+  await output.start();
+  let n = 0;
+  try {
+    for await (const packet of new EncodedPacketSink(at).packets()) await src.add(packet, n++ ? undefined : { decoderConfig });
+  } catch (e) { await output.cancel(); throw e; }
+  if (!n) { await output.cancel(); return null; }
+  src.close();
+  await output.finalize();
+  return new Blob([output.target.buffer!], { type: format === webm ? "audio/webm" : "audio/mp4" });
+};
+
+const reencodeAudio = async (input: Input): Promise<Blob | null> => {
   const webm = await canEncodeAudio("opus").catch(() => false);
   const output = new Output({ format: webm ? new WebMOutputFormat() : new Mp4OutputFormat(), target: new BufferTarget() });
   const conv = await Conversion.init({ input, output, showWarnings: false, video: { discard: true }, audio: { codec: webm ? "opus" : "aac", bitrate: 96_000 } });
   if (!conv.isValid) return null;
   await conv.execute();
   return new Blob([output.target.buffer!], { type: webm ? "audio/webm" : "audio/mp4" });
-}
+};
 
 // ---- Photos: ≤ 2000 px WebP (JPEG where the browser can't encode WebP, e.g. Safari).
 

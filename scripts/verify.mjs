@@ -9,6 +9,7 @@ import { rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
 import zlib from "node:zlib";
+import { ALL_FORMATS, BufferSource, Input } from "mediabunny";
 
 const freePort = () => new Promise((r) => { const s = createServer().listen(0, () => { const p = s.address().port; s.close(() => r(p)); }); });
 const PORT = await freePort();
@@ -1202,6 +1203,20 @@ const voiceWav = (sec, f0 = 220, rate = 24000) => {
   for (let i = 0; i < n; i++) { let x = 0; for (let h = 1; h <= 10; h++) x += (0.3 / h) * Math.sin((2 * Math.PI * f0 * h * i) / rate); b.writeInt16LE(Math.round(x * 0x7fff), 44 + i * 2); }
   return b;
 };
+const FXAAC = { name: "IMG_0001.mp4", mimeType: "video/mp4", buffer: readFileSync("scripts/fixtures/video-2s-aac.mp4") };
+const FXMUTE = { name: "sem-som.webm", mimeType: "video/webm", buffer: readFileSync("scripts/fixtures/video-2s-noaudio.webm") };
+// Tracks, codecs and duration of a stored file, read in Node with Mediabunny (container parsing only, no decoding).
+const tracksOf = async (buf) => {
+  const input = new Input({ source: new BufferSource(new Uint8Array(buf)), formats: ALL_FORMATS });
+  const [audio, video] = [await input.getAudioTracks(), await input.getVideoTracks()];
+  return { mime: await input.getMimeType(), audio: audio.map((t) => t.codec), video: video.length, duration: await input.computeDuration() };
+};
+// A video's audio track as issue #48 wants it: only audio, the source codec copied (no re-encode), ~2 s.
+const assertTrack = async (row, codec, mime) => {
+  assert(row.audio_key === `media/${row.id}/audio`, `audio_key ${row.audio_key}`);
+  const t = await tracksOf(r2get(row.audio_key));
+  assert(t.video === 0 && t.audio.length === 1 && t.audio[0] === codec && t.mime.startsWith(mime) && Math.abs(t.duration - 2) < 0.3, `track: ${JSON.stringify(t)}`);
+};
 const VOICE = { name: "voz.wav", mimeType: "audio/wav", buffer: voiceWav(3) };
 // Pitch (autocorrelation, 60–600 Hz) and duration of an audio file, decoded by the browser.
 const pitchOf = (p, buf) => p.evaluate(async (b64) => {
@@ -1291,7 +1306,7 @@ await check("ui: photos are stored as WebP ≤ 2000 px", async () => {
   assert(Math.max(s.width, s.height) === 2000 && s.height === 1333 && photo.length < big.length, `stored ${s.width}×${s.height}, ${photo.length} bytes`);
   await ctx.close();
 });
-await check("ui: without WebCodecs a video goes up as picked with a short warning; anonymous audio is still distorted", async () => {
+await check("ui: without WebCodecs a video goes up as picked with a short warning and its audio track still goes up (#48); anonymous audio is still distorted", async () => {
   const { ctx, p } = await newPage();
   await ctx.addInitScript(() => { delete window.VideoEncoder; delete window.VideoDecoder; delete window.AudioEncoder; delete window.AudioDecoder; });
   let release; const held = new Promise((r) => (release = r));
@@ -1304,7 +1319,17 @@ await check("ui: without WebCodecs a video goes up as picked with a short warnin
   release();
   await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 10000 });
   const row = await sendForm(p);
-  assert(r2get(row.media_key).equals(FX4K.buffer) && row.audio_key === null, `stored: ${JSON.stringify(row)}`);
+  assert(r2get(row.media_key).equals(FX4K.buffer), `stored: ${JSON.stringify(row)}`);
+  // Opus copied into WebM, and the browser still decodes it to the 2 s of the fixture.
+  await assertTrack(row, "opus", "audio/webm");
+  const decoded = await pitchOf(p, r2get(row.audio_key));
+  assert(Math.abs(decoded.duration - 2) < 0.3, `decoded track ${decoded.duration} s`);
+  // A phone video (H.264 + AAC in MP4): the AAC packets are copied into an .m4a.
+  await p.click("#again"); await p.locator("#upload").waitFor({ state: "visible" });
+  await p.setInputFiles("#file", FXAAC); await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 10000 });
+  const aac = await sendForm(p);
+  assert(r2get(aac.media_key).equals(FXAAC.buffer), `stored: ${JSON.stringify(aac)}`);
+  await assertTrack(aac, "aac", "audio/mp4");
   // The voice distortion needs only Web Audio: without WebCodecs it goes up as WAV.
   await p.click("#again"); await p.locator("#upload").waitFor({ state: "visible" });
   await p.setInputFiles("#file", VOICE); await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 8000 });
@@ -1312,6 +1337,41 @@ await check("ui: without WebCodecs a video goes up as picked with a short warnin
   const a = await sendForm(p), stored = r2get(a.media_key), { f0 } = await pitchOf(p, stored);
   assert(stored.subarray(0, 4).toString() === "RIFF" && f0 > 150 && f0 < 190, `anonymous without WebCodecs: f0 ${f0}`);
   await ctx.close();
+});
+await check("ui: when the video conversion throws, the original video is sent and its audio track still goes up (#48)", async () => {
+  const { ctx, p } = await newPage();
+  // WebCodecs is there (no warning) but every video decoder/encoder fails, as on the iPhone video of #48.
+  await ctx.addInitScript(() => {
+    for (const k of ["VideoDecoder", "VideoEncoder"]) {
+      const Orig = window[k];
+      window[k] = class { constructor() { throw new Error("verify: " + k + " broken"); } static isConfigSupported(c) { return Orig.isConfigSupported(c); } };
+    }
+  });
+  const tracks = []; await p.route("**/api/drafts/*/audio", (r) => { if (r.request().method() === "PUT") tracks.push(r.request().postDataBuffer()); return r.continue(); });
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.setInputFiles("#file", FX4K);
+  await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 30000 });
+  assert(!(await p.locator("#up-note").isVisible()), "no-WebCodecs warning shown");
+  assert(tracks.length === 1, `audio track PUTs: ${tracks.length}`);
+  await p.screenshot({ animations: "disabled", path: `${OUT}/video-conversion-failed-track-mobile.png`, fullPage: true });
+  const row = await sendForm(p);
+  assert(r2get(row.media_key).equals(FX4K.buffer), `stored: ${JSON.stringify(row)}`);
+  await assertTrack(row, "opus", "audio/webm");
+  await ctx.close();
+});
+await check("ui: a video with no audio track sends fine, with or without WebCodecs (no track, no error)", async () => {
+  for (const noCodecs of [false, true]) {
+    const { ctx, p } = await newPage();
+    if (noCodecs) await ctx.addInitScript(() => { delete window.VideoEncoder; delete window.VideoDecoder; delete window.AudioEncoder; delete window.AudioDecoder; });
+    const tracks = []; await p.route("**/api/drafts/*/audio", (r) => { tracks.push(r.request().method()); return r.continue(); });
+    await p.goto(BASE + "/", { waitUntil: "networkidle" });
+    await p.setInputFiles("#file", FXMUTE);
+    await p.locator("#up[data-state=done]").waitFor({ state: "visible", timeout: 30000 });
+    const row = await sendForm(p);
+    assert(row.status === "new" && row.audio_key === null && tracks.length === 0, `${noCodecs ? "no WebCodecs" : "WebCodecs"}: ${JSON.stringify(row)}, track requests ${tracks}`);
+    assert(!(await p.locator("#up-error").isVisible()), "error shown");
+    await ctx.close();
+  }
 });
 await check("ui: Enviar waits for an upload still running, then sends", async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } }); await offline(ctx);
