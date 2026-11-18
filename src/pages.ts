@@ -281,7 +281,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  // Enviar only with media and consent (and not while a send is running).
  const canSend = () => { $("send").disabled = busy || main.dataset.state !== "ready" || !main.dataset.media || !$("consent").checked; };
  const discard = () => {
-  player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src"); vplayer.removeAttribute("poster"); delete $("vready").dataset.thumb;
+  player.pause(); vplayer.pause(); player.removeAttribute("src"); vplayer.removeAttribute("src"); vplayer.removeAttribute("poster"); delete $("vready").dataset.thumb; frame = null;
   if (url) URL.revokeObjectURL(url); url = "";
   $("ready").removeAttribute("data-duration"); $("vready").removeAttribute("data-duration"); delete main.dataset.media; setState("idle");
   $("send-error").classList.remove("show");
@@ -408,10 +408,10 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 
  // ---- Background upload: draft (Turnstile) → signed URL(s) → R2 incoming/<id>/ ----
  const up = $("up");
- let job = 0, xhr = null, last = null, draft = null, track = false, uploadP = Promise.resolve(false);
+ let job = 0, xhr = null, last = null, draft = null, track = false, thumb = false, uploadP = Promise.resolve(false);
  // keep: the file is replaced inside the same draft (Anonimizar voz, Tentar de novo), so the draft stays.
  const cancelUpload = (keep = false) => {
-  job++; if (xhr) xhr.abort(); xhr = null; track = false; delete up.dataset.state; delete up.dataset.anon; $("up-note").hidden = true;
+  job++; if (xhr) xhr.abort(); xhr = null; track = false; thumb = false; delete up.dataset.state; delete up.dataset.anon; $("up-note").hidden = true;
   if (!keep) { draft = null; delete up.dataset.draft; }
  };
  const progress = (p) => { const v = Math.max(0, Math.min(100, Math.floor(p * 100))); $("up-pct").textContent = v + "%"; $("up-bar").style.width = v + "%"; up.querySelector("[role=progressbar]").setAttribute("aria-valuenow", String(v)); };
@@ -500,6 +500,11 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
    if (my !== job) return false;
    await put(u, blob, my, progress);
    if (prep.track && my === job) { await put(await fileUrl("audio", prep.track), prep.track, my, null); track = true; }
+   // A frame of the video for the panel list (#50). Optional: without it the panel shows the video icon.
+   if (kind === "video" && my === job) {
+    const t = await frameBlob(my);
+    if (t && my === job) { try { await put(await fileUrl("thumb", t), t, my, null); thumb = true; } catch (e) { if (my !== job) throw e; } }
+   }
    if (my !== job) return false;
    progress(1); up.dataset.anon = String(anon); up.dataset.state = "done"; return true;
   } catch (e) {
@@ -572,7 +577,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
    // Never send as anonymous a voice that went up undistorted.
    if (anonymous && up.dataset.anon !== "true") return sendError("Não foi possível carregar o arquivo. Tente de novo.");
    const r = await fetch("/api/drafts/" + draft + "/send", { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ consent: true, anonymous, track, name: anonymous ? "" : $("name").value, photos: photos.map((x) => x.slot) }) });
+    body: JSON.stringify({ consent: true, anonymous, track, thumb, name: anonymous ? "" : $("name").value, photos: photos.map((x) => x.slot) }) });
    if (r.status === 422) { discard(); fail("Este arquivo não é um áudio ou vídeo válido. Escolha outro."); return; }
    if (!r.ok) return sendError("Não foi possível enviar. Tente de novo.");
    thanks((await r.json()).name);
@@ -608,7 +613,12 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  // First frame as the preview: real browsers (Safari above all) show an empty box until play. On load the video
  // seeks to ~0.1 s, which makes the browser decode and paint a frame, and that frame is also kept as the poster
  // (a small JPEG from a canvas). The first play goes back to 0, so playing still starts from the beginning.
- let thumbPending = false;
+ // The same frame also goes up as the panel list thumbnail (#50): frame holds it for the video now in the player.
+ let thumbPending = false, frame = null;
+ const frameBlob = async (my) => {
+  for (let i = 0; i < 50 && my === job; i++) { if (frame && frame.src === vplayer.src) return frame.blob; await new Promise((r) => setTimeout(r, 100)); }
+  return null;
+ };
  vplayer.addEventListener("loadedmetadata", () => {
   thumbPending = true;
   const d = vplayer.duration;
@@ -616,12 +626,15 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
  });
  vplayer.addEventListener("seeked", () => {
   if (!thumbPending || !vplayer.paused || !vplayer.videoWidth) return;
+  const at = vplayer.src, keep = (blob) => { if (vplayer.src === at) frame = { src: at, blob }; };
   try {
    const c = document.createElement("canvas"), w = Math.min(960, vplayer.videoWidth);
    c.width = w; c.height = Math.round((vplayer.videoHeight / vplayer.videoWidth) * w) || 1;
    c.getContext("2d").drawImage(vplayer, 0, 0, c.width, c.height);
    vplayer.poster = c.toDataURL("image/jpeg", 0.8);
-  } catch {}
+   // WebP like the photos (≤ 960 px wide); a browser that can't encode WebP gives PNG, which Send accepts too.
+   c.toBlob((b) => keep(b && b.size ? b : null), "image/webp", 0.85);
+  } catch { keep(null); }
   $("vready").dataset.thumb = "1";
  });
  vplayer.addEventListener("play", () => { if (thumbPending) { thumbPending = false; vplayer.currentTime = 0; } });
@@ -635,7 +648,7 @@ export const startPage = (max = 90, siteKey = "") => layout("Coffee Time", `<sty
 })();
 </script>`);
 
-type Row = { id: string; created_at: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; transcript_error?: string | null; tags: string; photos?: number };
+type Row = { id: string; created_at: string; name: string | null; anonymous: number; kind: string; status: string; duration_s: number | null; transcript: string | null; transcript_error?: string | null; tags: string; photos?: number; thumb?: number };
 type PanelOpts = { counts: Record<string, number>; tags: string[]; filter: { status: string; tag: string; q: string }; user: string; now?: number };
 const STATUS: Record<string, string> = { uploading: "Enviando", new: "Novo", favorite: "Favorito", used: "Usado", rejected: "Rejeitado" };
 const TABS: [string, string][] = [["new", "Novos"], ["favorite", "Favoritos"], ["used", "Usados"], ["", "Todos"]];
@@ -674,8 +687,11 @@ export const panelPage = (rows: Row[], o: PanelOpts) => {
     return esc(`/painel${p ? `?${p}` : ""}`);
   };
   const fresh = o.counts.new || 0;
+  // First photo > a frame of the video (#50) > the audio/video icon.
   const thumb = (r: Row) => r.photos
     ? `<img class="thumb" src="/painel/foto/${encodeURIComponent(r.id)}" alt="" loading="lazy">`
+    : r.thumb && r.kind === "video"
+    ? `<img class="thumb" data-frame src="/painel/miniatura/${encodeURIComponent(r.id)}" alt="" loading="lazy">`
     : `<div class="thumb icon" data-kind="${r.kind === "video" ? "video" : "audio"}">${icon(r.kind === "video" ? VIDEO : MIC, 18)}</div>`;
   const sub = (r: Row) => r.anonymous ? "voz distorcida"
     : `${r.kind === "video" ? "vídeo" : "áudio"}${r.photos ? ` · <span class="photos">${r.photos} ${r.photos === 1 ? "foto" : "fotos"}</span>` : r.kind === "video" ? " · sem fotos" : ""}`;

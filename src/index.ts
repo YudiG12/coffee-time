@@ -87,7 +87,7 @@ const listSubmissions = async (db: D1Database, f: { status?: string; tag?: strin
   if (f.status) { where.push("status = ?"); args.push(f.status); }
   if (f.tag) { where.push("EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"); args.push(f.tag); }
   const q = fold((f.q || "").trim().slice(0, 100));
-  const rows = (await db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags, json_array_length(photo_keys) AS photos FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ${q ? SCAN : LIST}`).bind(...args).all<any>()).results;
+  const rows = (await db.prepare(`SELECT id, created_at, status, kind, name, anonymous, duration_s, transcript, transcript_error, tags, json_array_length(photo_keys) AS photos, (thumb_key IS NOT NULL) AS thumb FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ${q ? SCAN : LIST}`).bind(...args).all<any>()).results;
   if (!q) return rows;
   // Search (#31): the name the panel shows, as who() in pages.ts ("Anônimo" hides an anonymous sender's name, "Sem nome"
   // when none was given), the transcript and the tags.
@@ -109,16 +109,23 @@ app.get("/painel", async (c) => {
   if (f.tag && !tags.includes(f.tag)) tags.push(f.tag);
   return c.html(panelPage(rows, { counts, tags, filter: f, user: c.req.header("cf-access-authenticated-user-email") || "" }));
 });
-// First photo of a message, for the list thumbnail. Only keys saved in photo_keys are ever read.
-app.get("/painel/foto/:id", async (c) => {
-  const row = await c.env.DB.prepare("SELECT photo_keys FROM submissions WHERE id = ?").bind(c.req.param("id")).first<{ photo_keys: string }>();
-  const key = row ? (JSON.parse(row.photo_keys) as string[])[0] : undefined;
-  const obj = key ? await c.env.MEDIA.get(key) : null;
-  if (!obj) return c.text("not found", 404);
-  // The type comes from the bytes (Send already checked them), not from the header the browser sent.
+// List thumbnails: the first photo of a message, or a frame of a video without photos (#50). Only keys saved in the
+// row (photo_keys, thumb_key) are ever read. The type comes from the bytes (Send already checked them), not from the
+// header the browser sent.
+const image = async (bucket: R2Bucket, key: string | null | undefined) => {
+  const obj = key ? await bucket.get(key) : null;
+  if (!obj) return new Response("not found", { status: 404 });
   const b = new Uint8Array(await obj.arrayBuffer()), at = (i: number, s: string) => [...s].every((ch, k) => b[i + k] === ch.charCodeAt(0));
   const type = at(0, "\x89PNG") ? "image/png" : b[0] === 0xff && b[1] === 0xd8 ? "image/jpeg" : at(0, "RIFF") && at(8, "WEBP") ? "image/webp" : at(0, "GIF8") ? "image/gif" : "application/octet-stream";
   return new Response(b, { headers: { "content-type": type, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" } });
+};
+app.get("/painel/foto/:id", async (c) => {
+  const row = await c.env.DB.prepare("SELECT photo_keys FROM submissions WHERE id = ?").bind(c.req.param("id")).first<{ photo_keys: string }>();
+  return image(c.env.MEDIA, row ? (JSON.parse(row.photo_keys) as string[])[0] : undefined);
+});
+app.get("/painel/miniatura/:id", async (c) => {
+  const row = await c.env.DB.prepare("SELECT thumb_key FROM submissions WHERE id = ? AND kind = 'video' AND status != 'uploading'").bind(c.req.param("id")).first<{ thumb_key: string | null }>();
+  return image(c.env.MEDIA, row?.thumb_key);
 });
 app.get("/api/panel/submissions", async (c) => c.json(await listSubmissions(c.env.DB, c.req.query())));
 registerPanel(app); // detail page, files, zip, status/tags, delete (src/panel/detail.ts)
