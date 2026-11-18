@@ -1922,6 +1922,11 @@ await browser.close();
   await up(B2);
   const get = (path, headers = {}) => fetch(B2 + path, { headers }).then((r) => r.status).catch(() => 0);
   const post = (path, headers = {}) => fetch(B2 + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' }).then((r) => r.status).catch(() => 0);
+  await check("auth: the video frame route (#50) is behind the panel guard like /painel/foto/:id", async () => {
+    for (const p of ["/painel/miniatura/demo-3", "/painel/miniatura/nope"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
+    for (const h of ["Bearer wrong", `Bearer ${TOKEN}x`]) { const st = await get("/painel/miniatura/demo-3", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
+    const st = await get("/painel/miniatura/demo-3", { authorization: `Bearer ${TOKEN}` }); assert(st === 404, `correct Bearer → ${st} (demo-3 has no frame)`);
+  });
   await check("auth: the public page stays public", async () => { const st = await get("/"); assert(st === 200, `${st}`); });
   await check("auth: no credentials → 401 even on localhost with DEV_OPEN once a token is configured", async () => {
     for (const p of ["/painel", "/painel/foto/demo-1", "/api/panel/submissions", "/painel/envio/demo-1", "/painel/arquivo/demo-1/media", "/painel/arquivo/demo-1/photo-1", "/painel/envio/demo-1/arquivos.zip"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
@@ -1930,11 +1935,6 @@ await browser.close();
       const r = await fetch(B2 + "/api/panel/submissions/demo-1", { method, headers: { "content-type": "application/json" }, body: method === "POST" ? '{"status":"used"}' : undefined }).then((x) => x.status).catch(() => 0);
       assert(r === 401, `${method} /api/panel/submissions/demo-1 → ${r}`);
     }
-  });
-  await check("auth: the video frame route (#50) is behind the panel guard like /painel/foto/:id", async () => {
-    for (const p of ["/painel/miniatura/demo-3", "/painel/miniatura/nope"]) { const st = await get(p); assert(st === 401, `${p} → ${st}`); }
-    for (const h of ["Bearer wrong", `Bearer ${TOKEN}x`]) { const st = await get("/painel/miniatura/demo-3", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
-    const st = await get("/painel/miniatura/demo-3", { authorization: `Bearer ${TOKEN}` }); assert(st === 404, `correct Bearer → ${st} (demo-3 has no frame)`);
   });
   await check("auth: wrong / empty Bearer → 401", async () => {
     for (const h of ["Bearer wrong", "Bearer ", `Bearer ${TOKEN}x`]) { const st = await post("/mcp", { authorization: h }); assert(st === 401, `"${h}" → ${st}`); }
